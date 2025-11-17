@@ -9,6 +9,11 @@ from config import DB_CONFIG, ATTACK_TYPES
 conn = None
 
 
+def quote_ident(name: str) -> str:
+    """Экранировать идентификатор для корректной работы с кириллицей и пробелами."""
+    return f"\"{name.replace('\"', '\"\"')}\""
+
+
 def get_connection():
     global conn
     
@@ -55,6 +60,7 @@ def create_schema():
     - Схему ddos (только если не существует)
     - ENUM тип attack_type с типами атак
     - Таблицу experiments с ограничениями
+    - Дополнительную таблицу "вспомогательная" для связей
     
     Returns:
         Кортеж (успех: bool, сообщение: str)
@@ -93,6 +99,21 @@ def create_schema():
                 duration DECIMAL(10,2) NOT NULL CHECK (duration > 0),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+        """)
+        # Создаем вспомогательную таблицу (под внешние ключи)
+        cur.execute("""
+            CREATE TABLE ddos."вспомогательная" (
+                id SERIAL PRIMARY KEY,
+                label VARCHAR(255) NOT NULL,
+                description TEXT
+            );
+        """)
+        # Можно заранее наполнить базовыми значениями для удобства
+        cur.execute("""
+            INSERT INTO ddos."вспомогательная"(label, description)
+            VALUES
+                ('Сегмент А', 'Базовый сегмент инфраструктуры'),
+                ('Сегмент B', 'Дополнительный сегмент');
         """)
         
         # Сохраняем изменения
@@ -154,56 +175,50 @@ def insert_data(name, attack_type, packets, duration, date=None):
         return False, str(e)
 
 
-def get_data(attack_type_filter=None, date_from=None, date_to=None):
+def get_data(attack_type_filter=None, date_from=None, date_to=None, table_name=None):
     """
-    Получить данные из таблицы experiments с фильтрами
-    
-    Args:
-        attack_type_filter: Фильтр по типу атаки (None = все типы)
-        date_from: Дата начала (строка YYYY-MM-DD или None)
-        date_to: Дата окончания (строка YYYY-MM-DD или None)
-    
-    Returns:
-        Список кортежей с данными или пустой список при ошибке
+    Получить данные из таблицы с фильтрами
+    table_name: имя таблицы (если None, использовать 'experiments')
     """
     conn = get_connection()
     if not conn:
         return []
-    
+    if not table_name:
+        table_name = 'experiments'
     try:
         cur = conn.cursor()
-        
-        # Базовый запрос
-        query = "SELECT id, name, attack_type, packets, duration, created_at FROM ddos.experiments WHERE 1=1"
+        # Получить реальное описание колонок таблицы (на случай, если изменены)
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'ddos' AND table_name = %s
+            ORDER BY ordinal_position
+        """, (table_name,))
+        columns = [row[0] for row in cur.fetchall()]
+        if not columns:
+            cur.close()
+            return []
+        select_cols = ', '.join(quote_ident(col) for col in columns)
+        table_ident = quote_ident(table_name)
+        query = f'SELECT {select_cols} FROM ddos.{table_ident} WHERE 1=1'
         params = []
-        
-        # Добавляем фильтры если они указаны
-        if attack_type_filter:
-            query += " AND attack_type = %s"
+        # Фильтр только если attack_type реально есть среди колонок
+        if attack_type_filter is not None and 'attack_type' in columns:
+            query += f" AND {quote_ident('attack_type')} = %s"
             params.append(attack_type_filter)
-        
-        if date_from:
-            # Добавляем время 00:00:00 для начала дня
-            query += " AND created_at >= %s::timestamp"
+        if date_from and 'created_at' in columns:
+            query += f" AND {quote_ident('created_at')} >= %s::timestamp"
             params.append(f"{date_from} 00:00:00")
-        
-        if date_to:
-            # Добавляем время 23:59:59 для конца дня
-            query += " AND created_at <= %s::timestamp"
+        if date_to and 'created_at' in columns:
+            query += f" AND {quote_ident('created_at')} <= %s::timestamp"
             params.append(f"{date_to} 23:59:59")
-        
-        # Сортируем по дате создания (новые сначала)
-        query += " ORDER BY created_at DESC"
-        
-        # Выполняем запрос с параметрами
+        if 'created_at' in columns:
+            query += f" ORDER BY {quote_ident('created_at')} DESC"
         cur.execute(query, params)
         rows = cur.fetchall()
         cur.close()
-        
         return rows
-        
     except Exception as e:
-        logging.error(f"Ошибка получения данных: {e}")
+        logging.error(f'Ошибка получения данных: {e}')
         return []
 
 
@@ -251,7 +266,12 @@ def execute_alter_table(sql_command):
         logging.info(f"ALTER TABLE выполнен: {sql_command}")
         return True, "Команда успешно выполнена"
     except Exception as e:
-        conn.rollback()
+        # Устраняем двойной rollback при abort-транзакциях
+        if conn and conn.status != 1:  # 1 == STATUS_READY
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         logging.error(f"Ошибка ALTER TABLE: {e}")
         return False, str(e)
 

@@ -9,8 +9,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QDate
 from db import create_schema, insert_data, get_data
 from config import ATTACK_TYPES
-from alter_dialog import AlterTableDialog
+from alter_dialog import AlterTableDialog, COLUMN_LABELS
 from advanced_view_dialog import AdvancedViewDialog
+from db import get_table_columns, get_connection
 
 
 class InputDialog(QDialog):
@@ -162,14 +163,18 @@ class ViewDialog(QDialog):
         
         layout = QVBoxLayout()
         
+        # Убираем выпадающий выбор таблицы! Только одна реальная таблица
+        # layout.addWidget(self.table_chooser) — больше не нужен
+        
         # Секция фильтров
         filter_layout = QFormLayout()
         
         # Фильтр по типу атаки
         # Используем те же типы что и в БД
         self.attack_filter = QComboBox()
-        self.attack_filter.addItem("Все", None)  # Первый элемент - "Все" (без фильтра)
-        self.attack_filter.addItems(ATTACK_TYPES)  # Добавляем все типы атак
+        self.attack_filter.addItem("Все", None)
+        for attack in ATTACK_TYPES:
+            self.attack_filter.addItem(attack, attack)
         filter_layout.addRow("Тип атаки:", self.attack_filter)
         
         # Фильтр по дате начала
@@ -204,47 +209,49 @@ class ViewDialog(QDialog):
         
         # Загружаем данные при открытии окна
         self.load_data()
-    
+
+    def get_actual_table(self):
+        """Возвращает таблицу с данными экспериментов (с колонкой attack_type)."""
+        conn = get_connection()
+        tables = []
+        if conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema='ddos' AND table_type='BASE TABLE'
+                ORDER BY table_name
+            """)
+            tables = [r[0] for r in cur.fetchall()]
+            cur.close()
+        if not tables:
+            return "experiments"
+        # Сначала ищем таблицу, где есть нужная колонка
+        for table in tables:
+            cols = [c[0] for c in get_table_columns(table)]
+            if 'attack_type' in cols:
+                return table
+        # Если ни в одной нет attack_type — берём первую
+        return tables[0]
+
     def load_data(self):
-        """Загрузить данные из БД с применением фильтров"""
-        # Получаем значения фильтров
-        attack_type = self.attack_filter.currentData()  # None если выбрано "Все"
-        
-        # Получаем даты (можем передать None если не нужны фильтры)
+        """Загрузить данные из БД с применением фильтров и всегда актуальной структурой столбцов"""
+        table = self.get_actual_table()
+        attack_type = self.attack_filter.currentData()
         date_from = self.date_from.date().toString("yyyy-MM-dd")
         date_to = self.date_to.date().toString("yyyy-MM-dd")
-        
-        # Получаем данные из БД
-        data = get_data(attack_type, date_from, date_to)
-        
-        # Настраиваем таблицу
-        self.table.setColumnCount(6)  # 6 столбцов
-        self.table.setHorizontalHeaderLabels([
-            "ID", "Название", "Тип атаки", "Пакетов", "Длительность", "Дата"
-        ])
-        self.table.setRowCount(len(data))
-        
-        # Заполняем таблицу данными
+        data = get_data(attack_type, date_from, date_to, table_name=table)
+        colinfo = get_table_columns(table)
+        sql_columns = [col[0] for col in colinfo]
+        headers = [COLUMN_LABELS.get(col, col) for col in sql_columns]
+        self.table.setColumnCount(len(sql_columns))
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setRowCount(len(data) if data else 0)
         for row, record in enumerate(data):
             for col, value in enumerate(record):
-                # Форматируем дату для лучшего отображения
-                if col == 5 and value:  # Столбец с датой
-                    if isinstance(value, str):
-                        # Если это строка, оставляем как есть
-                        display_value = value
-                    else:
-                        # Если это datetime объект, форматируем
-                        display_value = str(value)
-                else:
-                    display_value = str(value) if value is not None else ""
-                
-                self.table.setItem(row, col, QTableWidgetItem(display_value))
-        
-        # Автоматически подгоняем ширину столбцов
+                self.table.setItem(row, col, QTableWidgetItem(str(value) if value is not None else ""))
         self.table.resizeColumnsToContents()
-        
-        # Показываем сообщение если данных нет
-        if len(data) == 0:
+        if not data:
             QMessageBox.information(self, "Информация", "Данные не найдены. Попробуйте изменить фильтры.")
 
 

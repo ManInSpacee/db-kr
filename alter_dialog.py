@@ -1,12 +1,46 @@
 """
 Окно для работы с ALTER TABLE
 """
+import re
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QPushButton,
     QComboBox, QLineEdit, QTextEdit, QMessageBox, QLabel, QCheckBox
 )
-from db import execute_alter_table, get_table_columns
+from db import execute_alter_table, get_table_columns, get_connection
 
+
+# Словарь сопоставления: отображаемое имя ↔ SQL-имя (двустороннее)
+COLUMN_LABELS = {
+    'id': 'ID',
+    'name': 'Название',
+    'attack_type': 'Тип атаки',
+    'packets': 'Пакетов',
+    'duration': 'Длительность',
+    'created_at': 'Дата',
+}
+REVERSE_COLUMN_LABELS = {v.lower(): k for k, v in COLUMN_LABELS.items()}
+
+def resolve_column_name(user_text):
+    """Нормализует и возвращает SQL-имя по пользовательскому (или оригинал)"""
+    user_text = user_text.strip().lower()
+    return REVERSE_COLUMN_LABELS.get(user_text, user_text)
+
+
+def quote_identifier(name: str) -> str:
+    """Экранировать идентификатор для использования в SQL (сохраняет регистр и кириллицу)."""
+    escaped = name.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def normalize_expression(expr: str) -> str:
+    """Подготовить выражение CHECK: убрать WHERE, заменить видимые названия столбцов на SQL-имена."""
+    expr = expr.strip()
+    if expr.lower().startswith("where "):
+        expr = expr[6:].strip()
+    for sql_name, label in COLUMN_LABELS.items():
+        pattern = re.compile(rf"\\b{re.escape(label)}\\b", flags=re.IGNORECASE)
+        expr = pattern.sub(sql_name, expr)
+    return expr
 
 class AlterTableDialog(QDialog):
     """Окно для изменения структуры таблицы"""
@@ -70,130 +104,267 @@ class AlterTableDialog(QDialog):
         self.setLayout(layout)
         self.update_form()
     
+    def get_existing_tables(self):
+        conn = get_connection()
+        if not conn:
+            return []
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema='ddos' AND table_type='BASE TABLE' "
+                "ORDER BY table_name"
+            )
+            tables = [row[0] for row in cur.fetchall()]
+            cur.close()
+            return tables
+        except Exception:
+            return []
+
+    def get_effective_table(self):
+        """Вернуть имя таблицы: если пользователь ввёл несуществующую, взять первую доступную."""
+        desired = self.table_edit.text().strip()
+        tables = self.get_existing_tables()
+        if desired and desired in tables:
+            return desired
+        if tables:
+            self.table_edit.setText(tables[0])
+            return tables[0]
+        return desired or "experiments"
+
+    def get_constraints_for_table(self, table_name):
+        conn = get_connection()
+        if not conn:
+            return []
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT constraint_name
+                FROM information_schema.table_constraints
+                WHERE table_schema = 'ddos' AND table_name = %s
+                ORDER BY constraint_name
+                """,
+                (table_name,),
+            )
+            names = [row[0] for row in cur.fetchall()]
+            cur.close()
+            return names
+        except Exception:
+            return []
+
+    def widget_value(self, key, default=""):
+        widget = self.dynamic_widgets.get(key)
+        if widget is None:
+            return default
+        if isinstance(widget, QComboBox):
+            data = widget.currentData()
+            return data if data is not None else widget.currentText()
+        if isinstance(widget, QLineEdit):
+            return widget.text()
+        if isinstance(widget, QCheckBox):
+            return widget.isChecked()
+        return default
+
     def update_form(self):
-        """Обновить форму в зависимости от выбранной операции"""
-        # Очищаем динамическую форму
+        # Очищаем динамическую форму и виджеты
         while self.dynamic_form.rowCount() > 0:
             self.dynamic_form.removeRow(0)
         self.dynamic_widgets.clear()
-        
         operation = self.operation_combo.currentText()
-        
+        # Для некоторых операций нужны названия столбцов (например, ограничения)
+        current_table = self.get_effective_table()
+        columns_info = get_table_columns(current_table)
+        colnames = [col[0] for col in columns_info] if columns_info else []
+        column_combo = lambda: self.make_column_combo(colnames)
+
         if operation == "Добавить столбец":
             self.dynamic_widgets['column_name'] = QLineEdit()
             self.dynamic_widgets['column_type'] = QLineEdit()
-            self.dynamic_widgets['not_null'] = QCheckBox()
             self.dynamic_form.addRow("Имя столбца:", self.dynamic_widgets['column_name'])
             self.dynamic_form.addRow("Тип данных:", self.dynamic_widgets['column_type'])
-            self.dynamic_form.addRow("NOT NULL:", self.dynamic_widgets['not_null'])
-            
         elif operation == "Удалить столбец":
-            self.dynamic_widgets['column_name'] = QLineEdit()
+            self.dynamic_widgets['column_name'] = column_combo()
             self.dynamic_form.addRow("Имя столбца:", self.dynamic_widgets['column_name'])
-            
         elif operation == "Переименовать столбец":
-            self.dynamic_widgets['old_name'] = QLineEdit()
+            self.dynamic_widgets['old_name'] = column_combo()
             self.dynamic_widgets['new_name'] = QLineEdit()
             self.dynamic_form.addRow("Старое имя:", self.dynamic_widgets['old_name'])
             self.dynamic_form.addRow("Новое имя:", self.dynamic_widgets['new_name'])
-            
         elif operation == "Изменить тип данных":
-            self.dynamic_widgets['column_name'] = QLineEdit()
+            self.dynamic_widgets['column_name'] = column_combo()
             self.dynamic_widgets['new_type'] = QLineEdit()
             self.dynamic_form.addRow("Имя столбца:", self.dynamic_widgets['column_name'])
             self.dynamic_form.addRow("Новый тип:", self.dynamic_widgets['new_type'])
-            
         elif operation == "Добавить ограничение":
             self.dynamic_widgets['constraint_name'] = QLineEdit()
             self.dynamic_widgets['constraint_type'] = QComboBox()
             self.dynamic_widgets['constraint_type'].addItems(['CHECK', 'UNIQUE', 'NOT NULL', 'FOREIGN KEY'])
-            self.dynamic_widgets['constraint_def'] = QLineEdit()
+            # Вложенная логика от выбора типа ограничения
+            self.dynamic_widgets['constraint_type'].currentTextChanged.connect(self.update_constraint_form)
             self.dynamic_form.addRow("Имя ограничения:", self.dynamic_widgets['constraint_name'])
             self.dynamic_form.addRow("Тип:", self.dynamic_widgets['constraint_type'])
-            self.dynamic_form.addRow("Определение:", self.dynamic_widgets['constraint_def'])
-            
+            # Создаём контейнер для вложенной формы
+            self.constraint_extra_form = QFormLayout()
+            self.dynamic_form.addRow(self.constraint_extra_form)
+            self.update_constraint_form()
         elif operation == "Удалить ограничение":
-            self.dynamic_widgets['constraint_name'] = QLineEdit()
+            constraints = self.get_constraints_for_table(current_table)
+            combo = QComboBox()
+            for name in constraints:
+                combo.addItem(name, name)
+            self.dynamic_widgets['constraint_name'] = combo
             self.dynamic_form.addRow("Имя ограничения:", self.dynamic_widgets['constraint_name'])
-            
         elif operation == "Переименовать таблицу":
             self.dynamic_widgets['new_name'] = QLineEdit()
             self.dynamic_form.addRow("Новое имя:", self.dynamic_widgets['new_name'])
-    
+
+    def make_column_combo(self, colnames):
+        from PySide6.QtWidgets import QComboBox
+        combo = QComboBox()
+        for col in colnames:
+            label = COLUMN_LABELS.get(col, col)
+            combo.addItem(label, col)
+        return combo
+
+    def update_constraint_form(self):
+        # Очищаем все предыдущие поля вложенной constraint-формы
+        while self.constraint_extra_form.rowCount() > 0:
+            self.constraint_extra_form.removeRow(0)
+        ctype = self.dynamic_widgets['constraint_type'].currentText()
+        current_table = self.get_effective_table()
+        columns_info = get_table_columns(current_table)
+        colnames = [col[0] for col in columns_info] if columns_info else []
+        from PySide6.QtWidgets import QComboBox, QLineEdit
+        # NOT NULL
+        if ctype == "NOT NULL":
+            self.dynamic_widgets['col_notnull'] = self.make_column_combo(colnames)
+            self.constraint_extra_form.addRow("Столбец:", self.dynamic_widgets['col_notnull'])
+        # UNIQUE
+        elif ctype == "UNIQUE":
+            self.dynamic_widgets['col_unique'] = self.make_column_combo(colnames)
+            self.constraint_extra_form.addRow("Столбец:", self.dynamic_widgets['col_unique'])
+        # CHECK
+        elif ctype == "CHECK":
+            self.dynamic_widgets['def_check'] = QLineEdit()
+            self.constraint_extra_form.addRow("Определение:", self.dynamic_widgets['def_check'])
+        # FOREIGN KEY
+        elif ctype == "FOREIGN KEY":
+            self.dynamic_widgets['col_fk'] = self.make_column_combo(colnames)
+            # Получаем список чужих таблиц клиента
+            tables = self.get_existing_tables()
+            fk_targets = [t for t in tables if t != current_table]
+            if not fk_targets:
+                fk_targets = tables
+            self.dynamic_widgets['to_table'] = QComboBox()
+            for table_name in fk_targets:
+                display = table_name
+                self.dynamic_widgets['to_table'].addItem(display, table_name)
+            # получить для целевой таблицы столбцы, реагировать на выбор
+            def _update_to_column():
+                tab = self.widget_value('to_table')
+                tocols = ["id"]
+                if tab:
+                    colinfo = get_table_columns(tab)
+                    tocols = [c[0] for c in colinfo] if colinfo else ["id"]
+                self.dynamic_widgets['to_column'].clear()
+                for col in tocols:
+                    self.dynamic_widgets['to_column'].addItem(col, col)
+            self.dynamic_widgets['to_column'] = QComboBox()
+            self.dynamic_widgets['to_table'].currentTextChanged.connect(_update_to_column)
+            _update_to_column()
+            self.dynamic_widgets['on_delete'] = QComboBox()
+            self.dynamic_widgets['on_delete'].addItems(['NO ACTION','CASCADE','SET NULL','SET DEFAULT','RESTRICT'])
+            self.dynamic_widgets['on_update'] = QComboBox()
+            self.dynamic_widgets['on_update'].addItems(['NO ACTION','CASCADE','SET NULL','SET DEFAULT','RESTRICT'])
+            self.constraint_extra_form.addRow("Столбец:", self.dynamic_widgets['col_fk'])
+            self.constraint_extra_form.addRow("Ссылаемая таблица:", self.dynamic_widgets['to_table'])
+            self.constraint_extra_form.addRow("Ссылаемый столбец:", self.dynamic_widgets['to_column'])
+            self.constraint_extra_form.addRow("ON DELETE:", self.dynamic_widgets['on_delete'])
+            self.constraint_extra_form.addRow("ON UPDATE:", self.dynamic_widgets['on_update'])
+
     def build_sql(self):
-        """Построить SQL команду"""
         operation = self.operation_combo.currentText()
-        table = self.table_edit.text().strip()
-        
+        table = self.get_effective_table()
         if not table:
             return None
-        
-        table_full = f"ddos.{table}"
-        
-        if operation == "Добавить столбец":
-            col_name = self.dynamic_widgets.get('column_name', QLineEdit()).text().strip()
-            col_type = self.dynamic_widgets.get('column_type', QLineEdit()).text().strip()
-            not_null = self.dynamic_widgets.get('not_null', QCheckBox()).isChecked()
+        table_full = f"ddos.{quote_identifier(table)}"
+        if operation == "Добавить ограничение":
+            const_name = self.widget_value('constraint_name').strip()
+            ctype = self.widget_value('constraint_type')
+            if not const_name:
+                return None
+            quoted_name = quote_identifier(const_name)
+            if ctype == "NOT NULL":
+                col = resolve_column_name(self.widget_value('col_notnull').strip())
+                if not col:
+                    return None
+                return f"ALTER TABLE {table_full} ALTER COLUMN {quote_identifier(col)} SET NOT NULL"
+            if ctype == "UNIQUE":
+                col = resolve_column_name(self.widget_value('col_unique').strip())
+                if not col:
+                    return None
+                return f"ALTER TABLE {table_full} ADD CONSTRAINT {quoted_name} UNIQUE({quote_identifier(col)})"
+            if ctype == "CHECK":
+                expr = normalize_expression(self.widget_value('def_check'))
+                if not expr:
+                    return None
+                return f"ALTER TABLE {table_full} ADD CONSTRAINT {quoted_name} CHECK ({expr})"
+            if ctype == "FOREIGN KEY":
+                from_col = resolve_column_name(self.widget_value('col_fk').strip())
+                to_table = self.widget_value('to_table')
+                to_col = self.widget_value('to_column')
+                on_delete = self.widget_value('on_delete').strip()
+                on_update = self.widget_value('on_update').strip()
+                if not from_col or not to_table or not to_col:
+                    return None
+                to_table_sql = quote_identifier(to_table)
+                to_col_sql = quote_identifier(to_col)
+                statement = (
+                    f"ALTER TABLE {table_full} ADD CONSTRAINT {quoted_name} "
+                    f"FOREIGN KEY ({quote_identifier(from_col)}) REFERENCES ddos.{to_table_sql}({to_col_sql})"
+                )
+                if on_delete and on_delete != 'NO ACTION':
+                    statement += f" ON DELETE {on_delete}"
+                if on_update and on_update != 'NO ACTION':
+                    statement += f" ON UPDATE {on_update}"
+                return statement
+        elif operation == "Добавить столбец":
+            col_name = resolve_column_name(self.widget_value('column_name').strip())
+            col_type = self.widget_value('column_type').strip()
             if not col_name or not col_type:
                 return None
-            sql = f"ALTER TABLE {table_full} ADD COLUMN {col_name} {col_type}"
-            if not_null:
-                sql += " NOT NULL"
+            sql = f"ALTER TABLE {table_full} ADD COLUMN {quote_identifier(col_name)} {col_type}"
             return sql
             
         elif operation == "Удалить столбец":
-            col_name = self.dynamic_widgets.get('column_name', QLineEdit()).text().strip()
+            col_name = resolve_column_name(self.widget_value('column_name').strip())
             if not col_name:
                 return None
-            return f"ALTER TABLE {table_full} DROP COLUMN {col_name}"
+            return f"ALTER TABLE {table_full} DROP COLUMN {quote_identifier(col_name)}"
             
         elif operation == "Переименовать столбец":
-            old_name = self.dynamic_widgets.get('old_name', QLineEdit()).text().strip()
-            new_name = self.dynamic_widgets.get('new_name', QLineEdit()).text().strip()
+            old_name = resolve_column_name(self.widget_value('old_name').strip())
+            new_name = resolve_column_name(self.widget_value('new_name').strip())
             if not old_name or not new_name:
                 return None
-            return f"ALTER TABLE {table_full} RENAME COLUMN {old_name} TO {new_name}"
+            return f"ALTER TABLE {table_full} RENAME COLUMN {quote_identifier(old_name)} TO {quote_identifier(new_name)}"
             
         elif operation == "Изменить тип данных":
-            col_name = self.dynamic_widgets.get('column_name', QLineEdit()).text().strip()
-            new_type = self.dynamic_widgets.get('new_type', QLineEdit()).text().strip()
+            col_name = resolve_column_name(self.widget_value('column_name').strip())
+            new_type = self.widget_value('new_type').strip()
             if not col_name or not new_type:
                 return None
-            return f"ALTER TABLE {table_full} ALTER COLUMN {col_name} TYPE {new_type}"
-            
-        elif operation == "Добавить ограничение":
-            const_name = self.dynamic_widgets.get('constraint_name', QLineEdit()).text().strip()
-            const_type = self.dynamic_widgets.get('constraint_type', QComboBox()).currentText()
-            const_def = self.dynamic_widgets.get('constraint_def', QLineEdit()).text().strip()
-            if not const_name:
-                return None
-            if const_type == "NOT NULL":
-                col_name = const_def.strip()
-                if not col_name:
-                    return None
-                return f"ALTER TABLE {table_full} ALTER COLUMN {col_name} SET NOT NULL"
-            elif const_type == "CHECK":
-                if not const_def:
-                    return None
-                return f"ALTER TABLE {table_full} ADD CONSTRAINT {const_name} CHECK ({const_def})"
-            elif const_type == "UNIQUE":
-                col_name = const_def.strip()
-                if not col_name:
-                    return None
-                return f"ALTER TABLE {table_full} ADD CONSTRAINT {const_name} UNIQUE ({col_name})"
-            elif const_type == "FOREIGN KEY":
-                if not const_def:
-                    return None
-                return f"ALTER TABLE {table_full} ADD CONSTRAINT {const_name} FOREIGN KEY {const_def}"
+            return f"ALTER TABLE {table_full} ALTER COLUMN {quote_identifier(col_name)} TYPE {new_type}"
             
         elif operation == "Удалить ограничение":
-            const_name = self.dynamic_widgets.get('constraint_name', QLineEdit()).text().strip()
+            const_name = self.widget_value('constraint_name').strip()
             if not const_name:
                 return None
-            return f"ALTER TABLE {table_full} DROP CONSTRAINT {const_name}"
+            return f"ALTER TABLE {table_full} DROP CONSTRAINT {quote_identifier(const_name)}"
             
         elif operation == "Переименовать таблицу":
-            new_name = self.dynamic_widgets.get('new_name', QLineEdit()).text().strip()
+            new_name = self.widget_value('new_name').strip()
             if not new_name:
                 return None
             return f"ALTER TABLE {table_full} RENAME TO {new_name}"

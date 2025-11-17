@@ -8,7 +8,7 @@ DB_CONFIG = {
     'port': 5432,
     'database': 'postgres',
     'user': 'postgres',
-    'password': 'klim'
+    'password': 'Tyur1234'
 }
 
 # Список типов DDoS атак (должен совпадать с ENUM в БД)
