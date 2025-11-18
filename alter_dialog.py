@@ -17,6 +17,12 @@ COLUMN_LABELS = {
     'packets': 'Пакетов',
     'duration': 'Длительность',
     'created_at': 'Дата',
+    'auxiliary_id': 'Инфраструктура',
+    'segment_code': 'Код сегмента',
+    'label': 'Название сегмента',
+    'location': 'Расположение',
+    'purpose': 'Назначение',
+    'criticality': 'Критичность',
 }
 REVERSE_COLUMN_LABELS = {v.lower(): k for k, v in COLUMN_LABELS.items()}
 

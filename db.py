@@ -85,11 +85,26 @@ def create_schema():
             CREATE TYPE ddos.attack_type AS ENUM ('{attack_types_str}');
         """)
         
-        # Создаем таблицу экспериментов
-        # PRIMARY KEY - первичный ключ (id)
-        # UNIQUE - уникальность имени
-        # NOT NULL - обязательное поле
-        # CHECK - проверка значений (packets > 0, duration > 0)
+        # Создаем вспомогательную таблицу (под внешние ключи)
+        cur.execute("""
+            CREATE TABLE ddos."вспомогательная" (
+                id SERIAL PRIMARY KEY,
+                segment_code VARCHAR(50) NOT NULL UNIQUE,
+                label VARCHAR(255) NOT NULL,
+                location VARCHAR(255),
+                purpose TEXT,
+                criticality VARCHAR(20) CHECK (criticality IN ('LOW','MEDIUM','HIGH'))
+            );
+        """)
+        # Можно заранее наполнить базовыми значениями для удобства
+        cur.execute("""
+            INSERT INTO ddos."вспомогательная"(segment_code, label, location, purpose, criticality)
+            VALUES
+                ('EDGE-A', 'Крайняя зона защиты', 'ЦОД Москва-1', 'Фронтовые фильтрующие узлы перед интернетом', 'HIGH'),
+                ('CORE-B', 'Ядро обработки', 'ЦОД Санкт-Петербург', 'Корневые балансировщики и аналитика', 'MEDIUM'),
+                ('LAB-C', 'Лабораторный стенд', 'Тестовый контур', 'Испытания новых сценариев атак', 'LOW');
+        """)
+        # Создаем таблицу экспериментов (после вспомогательной, чтобы работал FK)
         cur.execute("""
             CREATE TABLE ddos.experiments (
                 id SERIAL PRIMARY KEY,
@@ -97,23 +112,14 @@ def create_schema():
                 attack_type ddos.attack_type NOT NULL,
                 packets INTEGER NOT NULL CHECK (packets > 0),
                 duration DECIMAL(10,2) NOT NULL CHECK (duration > 0),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                auxiliary_id INTEGER,
+                CONSTRAINT fk_experiments_aux
+                    FOREIGN KEY (auxiliary_id)
+                    REFERENCES ddos."вспомогательная"(id)
+                    ON UPDATE CASCADE
+                    ON DELETE SET NULL
             );
-        """)
-        # Создаем вспомогательную таблицу (под внешние ключи)
-        cur.execute("""
-            CREATE TABLE ddos."вспомогательная" (
-                id SERIAL PRIMARY KEY,
-                label VARCHAR(255) NOT NULL,
-                description TEXT
-            );
-        """)
-        # Можно заранее наполнить базовыми значениями для удобства
-        cur.execute("""
-            INSERT INTO ddos."вспомогательная"(label, description)
-            VALUES
-                ('Сегмент А', 'Базовый сегмент инфраструктуры'),
-                ('Сегмент B', 'Дополнительный сегмент');
         """)
         
         # Сохраняем изменения
@@ -129,7 +135,31 @@ def create_schema():
         return False, f"Ошибка создания схемы: {str(e)}"
 
 
-def insert_data(name, attack_type, packets, duration, date=None):
+def drop_schema():
+    """Удалить схему ddos со всеми объектами, даже если таблицы переименованы."""
+    conn = get_connection()
+    if not conn:
+        return False, "Нет подключения к БД"
+    if not schema_exists():
+        return False, "Схема 'ddos' не найдена"
+    try:
+        cur = conn.cursor()
+        cur.execute("DROP SCHEMA ddos CASCADE;")
+        conn.commit()
+        cur.close()
+        logging.info("Схема 'ddos' удалена")
+        return True, "Все объекты схемы удалены"
+    except Exception as e:
+        if conn and conn.status != 1:  # not READY
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        logging.error(f"Ошибка удаления схемы: {e}")
+        return False, f"Ошибка удаления схемы: {str(e)}"
+
+
+def insert_data(name, attack_type, packets, duration, date=None, auxiliary_id=None):
     """
     Вставить данные в таблицу experiments
     
@@ -153,14 +183,14 @@ def insert_data(name, attack_type, packets, duration, date=None):
         # Если дата указана - используем её, иначе текущая дата/время
         if date:
             cur.execute("""
-                INSERT INTO ddos.experiments (name, attack_type, packets, duration, created_at)
-                VALUES (%s, %s, %s, %s, %s::timestamp)
-            """, (name, attack_type, int(packets), float(duration), date))
+                INSERT INTO ddos.experiments (name, attack_type, packets, duration, created_at, auxiliary_id)
+                VALUES (%s, %s, %s, %s, %s::timestamp, %s)
+            """, (name, attack_type, int(packets), float(duration), date, auxiliary_id))
         else:
             cur.execute("""
-                INSERT INTO ddos.experiments (name, attack_type, packets, duration)
-                VALUES (%s, %s, %s, %s)
-            """, (name, attack_type, int(packets), float(duration)))
+                INSERT INTO ddos.experiments (name, attack_type, packets, duration, auxiliary_id)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (name, attack_type, int(packets), float(duration), auxiliary_id))
         
         # Сохраняем изменения
         conn.commit()
@@ -173,6 +203,36 @@ def insert_data(name, attack_type, packets, duration, date=None):
         conn.rollback()
         logging.error(f"Ошибка вставки: {e}")
         return False, str(e)
+
+
+def get_auxiliary_items():
+    """Получить список записей из вспомогательной таблицы."""
+    conn = get_connection()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, segment_code, label, location, purpose, criticality
+            FROM ddos."вспомогательная"
+            ORDER BY label
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        return [
+            {
+                "id": row[0],
+                "segment_code": row[1],
+                "label": row[2],
+                "location": row[3],
+                "purpose": row[4],
+                "criticality": row[5]
+            }
+            for row in rows
+        ]
+    except Exception as e:
+        logging.error(f"Ошибка получения 'вспомогательная': {e}")
+        return []
 
 
 def get_data(attack_type_filter=None, date_from=None, date_to=None, table_name=None):

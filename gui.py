@@ -7,11 +7,11 @@ from PySide6.QtWidgets import (
     QMessageBox, QDateEdit
 )
 from PySide6.QtCore import QDate
-from db import create_schema, insert_data, get_data
+from db import create_schema, drop_schema, insert_data, get_data, get_auxiliary_items
 from config import ATTACK_TYPES
 from alter_dialog import AlterTableDialog, COLUMN_LABELS
 from advanced_view_dialog import AdvancedViewDialog
-from db import get_table_columns, get_connection
+from db import get_table_columns, get_connection, get_auxiliary_items
 
 
 class InputDialog(QDialog):
@@ -55,6 +55,17 @@ class InputDialog(QDialog):
         self.date_edit.setDate(QDate.currentDate())  # По умолчанию сегодня
         self.date_edit.setCalendarPopup(True)  # Показываем календарь
         layout.addRow("Дата:", self.date_edit)
+        
+        # Связь с вспомогательной таблицей
+        self.aux_combo = QComboBox()
+        self.aux_combo.addItem("Не выбрано", None)
+        try:
+            for item in get_auxiliary_items():
+                display = f"{item['label']} · {item['segment_code']} ({item['criticality']})"
+                self.aux_combo.addItem(display, item["id"])
+        except Exception:
+            pass
+        layout.addRow("Связь (вспомогательная):", self.aux_combo)
         
         # Кнопки
         btn_save = QPushButton("Сохранить")
@@ -136,10 +147,11 @@ class InputDialog(QDialog):
         packets = self.packets_edit.text().strip()
         duration = self.duration_edit.text().strip()
         date = self.date_edit.date().toString("yyyy-MM-dd")
+        aux_id = self.aux_combo.currentData()
         
         # Пытаемся сохранить данные
         try:
-            success, msg = insert_data(name, attack_type, packets, duration, date)
+            success, msg = insert_data(name, attack_type, packets, duration, date, aux_id)
             if success:
                 QMessageBox.information(self, "Успех", msg)
                 self.accept()  # Закрываем окно с успехом
@@ -247,9 +259,20 @@ class ViewDialog(QDialog):
         self.table.setColumnCount(len(sql_columns))
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setRowCount(len(data) if data else 0)
+        aux_lookup = {item["id"]: item for item in get_auxiliary_items()}
         for row, record in enumerate(data):
             for col, value in enumerate(record):
-                self.table.setItem(row, col, QTableWidgetItem(str(value) if value is not None else ""))
+                display_value = ""
+                if value is not None:
+                    if col < len(sql_columns) and sql_columns[col] == "auxiliary_id":
+                        info = aux_lookup.get(value)
+                        if info:
+                            display_value = f"{info['label']} · {info['segment_code']} ({info['criticality']})"
+                        else:
+                            display_value = str(value)
+                    else:
+                        display_value = str(value)
+                self.table.setItem(row, col, QTableWidgetItem(display_value))
         self.table.resizeColumnsToContents()
         if not data:
             QMessageBox.information(self, "Информация", "Данные не найдены. Попробуйте изменить фильтры.")
@@ -280,6 +303,11 @@ class MainWindow(QMainWindow):
         btn_create.clicked.connect(self.on_create)
         layout.addWidget(btn_create)
         
+        # Кнопка 1.1: Удалить базу
+        btn_drop = QPushButton("Удалить базу")
+        btn_drop.clicked.connect(self.on_drop)
+        layout.addWidget(btn_drop)
+        
         # Кнопка 2: Внести данные
         btn_insert = QPushButton("Внести данные")
         btn_insert.clicked.connect(self.on_insert)
@@ -305,6 +333,23 @@ class MainWindow(QMainWindow):
         success, msg = create_schema()
         if success:
             QMessageBox.information(self, "Успех", msg)
+        else:
+            QMessageBox.critical(self, "Ошибка", msg)
+    
+    def on_drop(self):
+        """Удалить схему и все созданные объекты"""
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение",
+            "Удалить схему 'ddos' со всеми таблицами и данными?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        success, msg = drop_schema()
+        if success:
+            QMessageBox.information(self, "Готово", msg)
         else:
             QMessageBox.critical(self, "Ошибка", msg)
     
