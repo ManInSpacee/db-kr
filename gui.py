@@ -175,8 +175,11 @@ class ViewDialog(QDialog):
         
         layout = QVBoxLayout()
         
-        # Убираем выпадающий выбор таблицы! Только одна реальная таблица
-        # layout.addWidget(self.table_chooser) — больше не нужен
+        # Выбор таблицы
+        self.table_selector = QComboBox()
+        self.populate_tables()
+        self.table_selector.currentIndexChanged.connect(self.load_data)
+        layout.addWidget(self.table_selector)
         
         # Секция фильтров
         filter_layout = QFormLayout()
@@ -222,8 +225,9 @@ class ViewDialog(QDialog):
         # Загружаем данные при открытии окна
         self.load_data()
 
-    def get_actual_table(self):
-        """Возвращает таблицу с данными экспериментов (с колонкой attack_type)."""
+    def populate_tables(self):
+        """Заполнить список таблиц для отображения и вернуть первый элемент."""
+        self.table_selector.clear()
         conn = get_connection()
         tables = []
         if conn:
@@ -234,21 +238,22 @@ class ViewDialog(QDialog):
                 WHERE table_schema='ddos' AND table_type='BASE TABLE'
                 ORDER BY table_name
             """)
-            tables = [r[0] for r in cur.fetchall()]
+            tables = [row[0] for row in cur.fetchall()]
             cur.close()
-        if not tables:
+        if tables:
+            for table in tables:
+                self.table_selector.addItem(table, table)
+            self.table_selector.setCurrentIndex(0)
+            return tables[0]
+        else:
+            self.table_selector.addItem("experiments", "experiments")
             return "experiments"
-        # Сначала ищем таблицу, где есть нужная колонка
-        for table in tables:
-            cols = [c[0] for c in get_table_columns(table)]
-            if 'attack_type' in cols:
-                return table
-        # Если ни в одной нет attack_type — берём первую
-        return tables[0]
 
     def load_data(self):
         """Загрузить данные из БД с применением фильтров и всегда актуальной структурой столбцов"""
-        table = self.get_actual_table()
+        table = self.table_selector.currentData()
+        if not table:
+            table = self.populate_tables()
         attack_type = self.attack_filter.currentData()
         date_from = self.date_from.date().toString("yyyy-MM-dd")
         date_to = self.date_to.date().toString("yyyy-MM-dd")

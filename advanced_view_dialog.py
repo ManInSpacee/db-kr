@@ -10,7 +10,12 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import QDateEdit
-from db import execute_custom_query, get_table_columns
+from db import execute_custom_query, get_table_columns, get_connection
+
+
+def quote_ident(name: str) -> str:
+    """Простое экранирование идентификаторов для SQL."""
+    return '"' + name.replace('"', '""') + '"'
 
 
 class AdvancedViewDialog(QDialog):
@@ -68,6 +73,12 @@ class AdvancedViewDialog(QDialog):
         """Настройка вкладки SELECT"""
         layout = QVBoxLayout()
         tab.setLayout(layout)
+
+        # Выбор таблицы
+        self.select_table_combo = QComboBox()
+        self.populate_table_combo(self.select_table_combo)
+        layout.addWidget(QLabel("Таблица:"))
+        layout.addWidget(self.select_table_combo)
         
         # Выбор столбцов
         group_cols = QGroupBox("Выбор столбцов")
@@ -130,10 +141,18 @@ class AdvancedViewDialog(QDialog):
         layout = QVBoxLayout()
         tab.setLayout(layout)
         
+        layout.addWidget(QLabel("Таблица:"))
+        self.search_table_combo = QComboBox()
+        self.populate_table_combo(self.search_table_combo)
+        layout.addWidget(self.search_table_combo)
+        
         form = QFormLayout()
         
         self.search_column = QComboBox()
-        self.search_column.addItems(["name", "attack_type"])
+        self.populate_column_combo(self.search_column, self.search_table_combo.currentData())
+        self.search_table_combo.currentTextChanged.connect(
+            lambda _: self.populate_column_combo(self.search_column, self.search_table_combo.currentData())
+        )
         form.addRow("Столбец:", self.search_column)
         
         self.search_pattern = QLineEdit()
@@ -165,11 +184,19 @@ class AdvancedViewDialog(QDialog):
         """Настройка вкладки функций работы со строками"""
         layout = QVBoxLayout()
         tab.setLayout(layout)
+
+        layout.addWidget(QLabel("Таблица:"))
+        self.strings_table_combo = QComboBox()
+        self.populate_table_combo(self.strings_table_combo)
+        layout.addWidget(self.strings_table_combo)
         
         form = QFormLayout()
         
         self.string_column = QComboBox()
-        self.string_column.addItems(["name"])
+        self.populate_column_combo(self.string_column, self.strings_table_combo.currentData())
+        self.strings_table_combo.currentTextChanged.connect(
+            lambda _: self.populate_column_combo(self.string_column, self.strings_table_combo.currentData())
+        )
         form.addRow("Столбец:", self.string_column)
         
         self.string_func = QComboBox()
@@ -215,20 +242,32 @@ class AdvancedViewDialog(QDialog):
         self.join_type.addItems(["INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"])
         form.addRow("Тип JOIN:", self.join_type)
         
-        self.join_table1 = QLineEdit()
-        self.join_table1.setText("experiments")
+        tables = self.get_schema_tables()
+        if not tables:
+            tables = ["experiments"]
+        
+        self.join_table1 = QComboBox()
+        for table in tables:
+            self.join_table1.addItem(table, table)
         form.addRow("Таблица 1:", self.join_table1)
         
-        self.join_table2 = QLineEdit()
-        self.join_table2.setPlaceholderText("experiments")
+        self.join_table2 = QComboBox()
+        for table in tables:
+            self.join_table2.addItem(table, table)
         form.addRow("Таблица 2:", self.join_table2)
         
-        self.join_on = QLineEdit()
-        self.join_on.setPlaceholderText("t1.id = t2.id")
-        form.addRow("Условие ON:", self.join_on)
+        self.join_field1 = QComboBox()
+        self.join_field2 = QComboBox()
+        form.addRow("Поле таблицы 1:", self.join_field1)
+        form.addRow("Поле таблицы 2:", self.join_field2)
+        
+        self.join_table1.currentTextChanged.connect(lambda _: self.populate_join_fields(self.join_table1, self.join_field1))
+        self.join_table2.currentTextChanged.connect(lambda _: self.populate_join_fields(self.join_table2, self.join_field2))
+        self.populate_join_fields(self.join_table1, self.join_field1)
+        self.populate_join_fields(self.join_table2, self.join_field2)
         
         self.join_columns = QTextEdit()
-        self.join_columns.setPlaceholderText("t1.id, t1.name, t2.packets")
+        self.join_columns.setPlaceholderText("t1.*, t2.* или перечислите нужные поля")
         self.join_columns.setMaximumHeight(60)
         form.addRow("Столбцы:", self.join_columns)
         
@@ -240,6 +279,52 @@ class AdvancedViewDialog(QDialog):
         
         layout.addStretch()
     
+    def get_schema_tables(self):
+        """Получить список таблиц схемы ddos."""
+        conn = get_connection()
+        if not conn:
+            return []
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema='ddos' AND table_type='BASE TABLE'
+                ORDER BY table_name
+            """)
+            tables = [row[0] for row in cur.fetchall()]
+            cur.close()
+            return tables
+        except Exception:
+            return []
+    
+    def populate_table_combo(self, combo):
+        tables = self.get_schema_tables()
+        if not tables:
+            tables = ["experiments"]
+        combo.clear()
+        for table in tables:
+            combo.addItem(table, table)
+        combo.setCurrentIndex(0)
+
+    def populate_column_combo(self, combo, table_name):
+        combo.clear()
+        if not table_name:
+            return
+        columns = [col[0] for col in get_table_columns(table_name)]
+        for col in columns:
+            combo.addItem(col, col)
+
+    def populate_join_fields(self, table_combo, fields_combo):
+        """Обновить список колонок для выбранной таблицы."""
+        table_name = table_combo.currentData()
+        fields_combo.clear()
+        if not table_name:
+            return
+        columns = [col[0] for col in get_table_columns(table_name)]
+        for col in columns:
+            fields_combo.addItem(col, col)
+
     def update_string_params(self):
         """Обновить параметры для функций строк"""
         func = self.string_func.currentText()
@@ -263,7 +348,8 @@ class AdvancedViewDialog(QDialog):
         if not columns:
             columns = "*"
         
-        query = f"SELECT {columns} FROM ddos.experiments"
+        table = self.select_table_combo.currentData() or "experiments"
+        query = f"SELECT {columns} FROM ddos.{quote_ident(table)}"
         
         # WHERE
         where = self.where_text.text().strip()
@@ -299,7 +385,7 @@ class AdvancedViewDialog(QDialog):
     
     def execute_search(self):
         """Выполнить поиск по тексту"""
-        column = self.search_column.currentText()
+        column = self.search_column.currentData()
         pattern = self.search_pattern.text().strip()
         search_type = self.search_type.currentText()
         
@@ -324,7 +410,9 @@ class AdvancedViewDialog(QDialog):
             operator = "~"
             pattern = f"'{pattern}'"
         
-        query = f"SELECT * FROM ddos.experiments WHERE {column} {operator} {pattern}"
+        table = self.search_table_combo.currentData() or "experiments"
+        col_expr = f"({quote_ident(column)}::text)" if operator in ("LIKE", "ILIKE") or "~~" in operator else quote_ident(column)
+        query = f"SELECT * FROM ddos.{quote_ident(table)} WHERE {col_expr} {operator} {pattern}"
         success, data, columns = execute_custom_query(query)
         
         if success:
@@ -334,48 +422,49 @@ class AdvancedViewDialog(QDialog):
     
     def execute_strings(self):
         """Выполнить функции работы со строками"""
-        column = self.string_column.currentText()
+        column = self.string_column.currentData()
+        col_sql = quote_ident(column) if column else column
         func = self.string_func.currentText()
         param1 = self.string_param1.text().strip()
         param2 = self.string_param2.text().strip()
         
         # Строим выражение функции
         if "UPPER" in func:
-            expr = f"UPPER({column})"
+            expr = f"UPPER({col_sql})"
         elif "LOWER" in func:
-            expr = f"LOWER({column})"
+            expr = f"LOWER({col_sql})"
         elif "SUBSTRING" in func:
             if not param1 or not param2:
                 QMessageBox.warning(self, "Ошибка", "Укажите начало и длину")
                 return
-            expr = f"SUBSTRING({column} FROM {param1} FOR {param2})"
+            expr = f"SUBSTRING({col_sql} FROM {param1} FOR {param2})"
         elif "TRIM" in func:
-            expr = f"TRIM({column})"
+            expr = f"TRIM({col_sql})"
         elif "LTRIM" in func:
-            expr = f"LTRIM({column})"
+            expr = f"LTRIM({col_sql})"
         elif "RTRIM" in func:
-            expr = f"RTRIM({column})"
+            expr = f"RTRIM({col_sql})"
         elif "LPAD" in func:
             if not param1:
                 QMessageBox.warning(self, "Ошибка", "Укажите длину")
                 return
             pad_char = param2 if param2 else "' '"
-            expr = f"LPAD({column}, {param1}, {pad_char})"
+            expr = f"LPAD({col_sql}, {param1}, {pad_char})"
         elif "RPAD" in func:
             if not param1:
                 QMessageBox.warning(self, "Ошибка", "Укажите длину")
                 return
             pad_char = param2 if param2 else "' '"
-            expr = f"RPAD({column}, {param1}, {pad_char})"
+            expr = f"RPAD({col_sql}, {param1}, {pad_char})"
         elif "CONCAT" in func:
-            parts = [column]
+            parts = [col_sql]
             if param1:
                 parts.append(param1)
             if param2:
                 parts.append(param2)
             expr = f"CONCAT({', '.join(parts)})"
         elif "||" in func:
-            parts = [column]
+            parts = [col_sql]
             if param1:
                 parts.append(param1)
             if param2:
@@ -384,7 +473,8 @@ class AdvancedViewDialog(QDialog):
         else:
             expr = column
         
-        query = f"SELECT {column}, {expr} AS result FROM ddos.experiments"
+        table = self.strings_table_combo.currentData() or "experiments"
+        query = f"SELECT {quote_ident(column)}, {expr} AS result FROM ddos.{quote_ident(table)}"
         success, data, columns = execute_custom_query(query)
         
         if success:
@@ -395,23 +485,27 @@ class AdvancedViewDialog(QDialog):
     def execute_join(self):
         """Выполнить JOIN"""
         join_type = self.join_type.currentText()
-        table1 = self.join_table1.text().strip()
-        table2 = self.join_table2.text().strip()
-        on_condition = self.join_on.text().strip()
+        table1 = self.join_table1.currentData()
+        table2 = self.join_table2.currentData()
+        field1 = self.join_field1.currentData()
+        field2 = self.join_field2.currentData()
         columns = self.join_columns.toPlainText().strip()
         
         if not table1 or not table2:
             QMessageBox.warning(self, "Ошибка", "Укажите обе таблицы")
             return
         
-        if not on_condition:
-            QMessageBox.warning(self, "Ошибка", "Укажите условие ON")
+        if not field1 or not field2:
+            QMessageBox.warning(self, "Ошибка", "Выберите поля для связывания")
             return
         
         if not columns:
             columns = "*"
         
-        query = f"SELECT {columns} FROM ddos.{table1} t1 {join_type} ddos.{table2} t2 ON {on_condition}"
+        t1_sql = f"ddos.{quote_ident(table1)}"
+        t2_sql = f"ddos.{quote_ident(table2)}"
+        on_condition = f"t1.{quote_ident(field1)} = t2.{quote_ident(field2)}"
+        query = f"SELECT {columns} FROM {t1_sql} t1 {join_type} {t2_sql} t2 ON {on_condition}"
         success, data, cols = execute_custom_query(query)
         
         if success:
