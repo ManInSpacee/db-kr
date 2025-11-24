@@ -171,7 +171,7 @@ class AlterTableDialog(QDialog):
         if isinstance(widget, QCheckBox):
             return widget.isChecked()
         return default
-
+    
     def update_form(self):
         # Очищаем динамическую форму и виджеты
         while self.dynamic_form.rowCount() > 0:
@@ -183,7 +183,7 @@ class AlterTableDialog(QDialog):
         columns_info = get_table_columns(current_table)
         colnames = [col[0] for col in columns_info] if columns_info else []
         column_combo = lambda: self.make_column_combo(colnames)
-
+        
         if operation == "Добавить столбец":
             self.dynamic_widgets['column_name'] = QLineEdit()
             self.dynamic_widgets['column_type'] = QLineEdit()
@@ -224,7 +224,7 @@ class AlterTableDialog(QDialog):
         elif operation == "Переименовать таблицу":
             self.dynamic_widgets['new_name'] = QLineEdit()
             self.dynamic_form.addRow("Новое имя:", self.dynamic_widgets['new_name'])
-
+    
     def make_column_combo(self, colnames):
         from PySide6.QtWidgets import QComboBox
         combo = QComboBox()

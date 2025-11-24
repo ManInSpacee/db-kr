@@ -4,7 +4,7 @@
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton,
     QDialog, QFormLayout, QLineEdit, QComboBox, QTableWidget, QTableWidgetItem,
-    QMessageBox, QDateEdit
+    QMessageBox, QDateEdit, QGroupBox
 )
 from PySide6.QtCore import QDate
 from db import create_schema, drop_schema, insert_data, get_data, get_auxiliary_items
@@ -211,6 +211,9 @@ class ViewDialog(QDialog):
         layout.addLayout(filter_layout)
         layout.addWidget(btn_apply)
         
+        # Блок подзапросов
+        self.setup_subquery_group(layout)
+        
         # Таблица для отображения данных
         self.table = QTableWidget()
         layout.addWidget(self.table)
@@ -249,6 +252,177 @@ class ViewDialog(QDialog):
             self.table_selector.addItem("experiments", "experiments")
             return "experiments"
 
+    def setup_subquery_group(self, layout):
+        group = QGroupBox("Фильтр с подзапросом")
+        form = QFormLayout()
+        
+        self.subquery_type = QComboBox()
+        self.subquery_type.addItem("Не использовать", None)
+        self.subquery_type.addItem("EXISTS", "EXISTS")
+        self.subquery_type.addItem("NOT EXISTS", "NOT EXISTS")
+        self.subquery_type.addItem("ANY", "ANY")
+        self.subquery_type.addItem("ALL", "ALL")
+        form.addRow("Тип фильтра:", self.subquery_type)
+        
+        self.outer_column_combo = QComboBox()
+        form.addRow("Колонка основной таблицы:", self.outer_column_combo)
+        
+        self.subquery_operator = QComboBox()
+        self.subquery_operator.addItems(["=", "<>", ">", ">=", "<", "<="])
+        form.addRow("Оператор:", self.subquery_operator)
+        
+        self.subquery_table_combo = QComboBox()
+        self.subquery_table_combo.currentIndexChanged.connect(self.populate_subquery_columns)
+        form.addRow("Таблица подзапроса:", self.subquery_table_combo)
+        
+        self.subquery_column_combo = QComboBox()
+        form.addRow("Колонка подзапроса:", self.subquery_column_combo)
+        
+        self.subquery_link_column_combo = QComboBox()
+        form.addRow("Колонка для связи:", self.subquery_link_column_combo)
+        
+        self.subquery_filter_column_combo = QComboBox()
+        form.addRow("Фильтр по колонке:", self.subquery_filter_column_combo)
+        
+        self.subquery_filter_operator = QComboBox()
+        self.subquery_filter_operator.addItems(["=", "<>", ">", ">=", "<", "<="])
+        form.addRow("Оператор фильтра:", self.subquery_filter_operator)
+        
+        self.subquery_filter_value = QLineEdit()
+        form.addRow("Значение фильтра:", self.subquery_filter_value)
+        
+        group.setLayout(form)
+        layout.addWidget(group)
+        
+        self.populate_subquery_tables()
+        self.subquery_type.currentIndexChanged.connect(self.update_subquery_controls)
+        self.update_subquery_controls()
+
+    def get_schema_tables(self):
+        conn = get_connection()
+        if not conn:
+            return []
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema='ddos' AND table_type='BASE TABLE'
+                ORDER BY table_name
+            """)
+            tables = [row[0] for row in cur.fetchall()]
+            cur.close()
+            return tables
+        except Exception:
+            return []
+
+    def populate_subquery_tables(self):
+        tables = self.get_schema_tables()
+        if not tables:
+            tables = ["experiments"]
+        self.subquery_table_combo.blockSignals(True)
+        self.subquery_table_combo.clear()
+        for table in tables:
+            self.subquery_table_combo.addItem(table, table)
+        self.subquery_table_combo.blockSignals(False)
+        self.populate_subquery_columns()
+
+    def populate_subquery_columns(self):
+        table = self.subquery_table_combo.currentData()
+        columns = [col[0] for col in get_table_columns(table)] if table else []
+        combos = [
+            self.subquery_column_combo,
+            self.subquery_link_column_combo,
+            self.subquery_filter_column_combo,
+        ]
+        for combo in combos:
+            combo.clear()
+            for col in columns:
+                combo.addItem(col, col)
+
+    def update_subquery_controls(self):
+        mode = self.subquery_type.currentData()
+        has_filter = mode is not None
+        compare_mode = mode in ("ANY", "ALL")
+        exists_mode = mode in ("EXISTS", "NOT EXISTS")
+        
+        self.outer_column_combo.setEnabled(has_filter)
+        self.subquery_table_combo.setEnabled(has_filter)
+        self.subquery_column_combo.setEnabled(has_filter)
+        self.subquery_filter_column_combo.setEnabled(has_filter)
+        self.subquery_filter_operator.setEnabled(has_filter)
+        self.subquery_filter_value.setEnabled(has_filter)
+        
+        self.subquery_operator.setEnabled(compare_mode)
+        self.subquery_link_column_combo.setEnabled(exists_mode)
+
+    def update_outer_columns(self, columns):
+        self.outer_column_combo.clear()
+        for col in columns:
+            self.outer_column_combo.addItem(COLUMN_LABELS.get(col, col), col)
+
+    def quote_ident(self, name):
+        return '"' + str(name).replace('"', '""') + '"'
+
+    def qualify_column(self, table, column):
+        return f"ddos.{self.quote_ident(table)}.{self.quote_ident(column)}"
+
+    def format_literal(self, value):
+        value = value.strip()
+        if not value:
+            return "''"
+        try:
+            if "." in value:
+                float(value)
+            else:
+                int(value)
+            return value
+        except ValueError:
+            return "'" + value.replace("'", "''") + "'"
+
+    def build_subquery_condition(self, table):
+        sub_type = self.subquery_type.currentData()
+        if not sub_type:
+            return None
+        
+        sub_table = self.subquery_table_combo.currentData()
+        sub_column = self.subquery_column_combo.currentData()
+        if not sub_table or not sub_column:
+            return None
+        
+        sub_table_sql = f"ddos.{self.quote_ident(sub_table)}"
+        filter_col = self.subquery_filter_column_combo.currentData()
+        filter_val = self.subquery_filter_value.text().strip()
+        where_parts = []
+        if filter_col and filter_val:
+            filter_op = self.subquery_filter_operator.currentText()
+            where_parts.append(
+                f"{self.quote_ident(filter_col)} {filter_op} {self.format_literal(filter_val)}"
+            )
+        
+        if sub_type in ("EXISTS", "NOT EXISTS"):
+            outer_col = self.outer_column_combo.currentData()
+            link_col = self.subquery_link_column_combo.currentData()
+            if not (outer_col and link_col):
+                return None
+            where_parts.insert(
+                0,
+                f"{self.quote_ident(link_col)} = {self.qualify_column(table, outer_col)}"
+            )
+            where_sql = " AND ".join(where_parts) if where_parts else "TRUE"
+            subquery = f"SELECT 1 FROM {sub_table_sql} WHERE {where_sql}"
+            return f"{sub_type} ({subquery})"
+        else:
+            outer_col = self.outer_column_combo.currentData()
+            if not outer_col:
+                return None
+            where_sql = ""
+            if where_parts:
+                where_sql = " WHERE " + " AND ".join(where_parts)
+            subquery = f"SELECT {self.quote_ident(sub_column)} FROM {sub_table_sql}{where_sql}"
+            operator = self.subquery_operator.currentText()
+            return f"{self.qualify_column(table, outer_col)} {operator} {sub_type} ({subquery})"
+
     def load_data(self):
         """Загрузить данные из БД с применением фильтров и всегда актуальной структурой столбцов"""
         table = self.table_selector.currentData()
@@ -257,9 +431,12 @@ class ViewDialog(QDialog):
         attack_type = self.attack_filter.currentData()
         date_from = self.date_from.date().toString("yyyy-MM-dd")
         date_to = self.date_to.date().toString("yyyy-MM-dd")
-        data = get_data(attack_type, date_from, date_to, table_name=table)
+        extra_condition = self.build_subquery_condition(table)
+        extra_conditions = [extra_condition] if extra_condition else None
+        data = get_data(attack_type, date_from, date_to, table_name=table, extra_conditions=extra_conditions)
         colinfo = get_table_columns(table)
         sql_columns = [col[0] for col in colinfo]
+        self.update_outer_columns(sql_columns)
         headers = [COLUMN_LABELS.get(col, col) for col in sql_columns]
         self.table.setColumnCount(len(sql_columns))
         self.table.setHorizontalHeaderLabels(headers)

@@ -235,7 +235,7 @@ def get_auxiliary_items():
         return []
 
 
-def get_data(attack_type_filter=None, date_from=None, date_to=None, table_name=None):
+def get_data(attack_type_filter=None, date_from=None, date_to=None, table_name=None, extra_conditions=None):
     """
     Получить данные из таблицы с фильтрами
     table_name: имя таблицы (если None, использовать 'experiments')
@@ -271,6 +271,10 @@ def get_data(attack_type_filter=None, date_from=None, date_to=None, table_name=N
         if date_to and 'created_at' in columns:
             query += f" AND {quote_ident('created_at')} <= %s::timestamp"
             params.append(f"{date_to} 23:59:59")
+        if extra_conditions:
+            for cond in extra_conditions:
+                if cond:
+                    query += f" AND ({cond})"
         if 'created_at' in columns:
             query += f" ORDER BY {quote_ident('created_at')} DESC"
         cur.execute(query, params)
