@@ -2,163 +2,279 @@
 Графический интерфейс приложения
 """
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QDialog, QFormLayout, QLineEdit, QComboBox, QTableWidget, QTableWidgetItem,
-    QMessageBox, QDateEdit, QGroupBox
+    QMessageBox, QDateEdit, QGroupBox, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel
 )
-from PySide6.QtCore import QDate
-from db import create_schema, drop_schema, insert_data, get_data, get_auxiliary_items
+from PySide6.QtCore import QDate, Qt
+from db import create_schema, drop_schema, get_data, get_auxiliary_items
 from config import ATTACK_TYPES
 from alter_dialog import AlterTableDialog, COLUMN_LABELS
 from advanced_view_dialog import AdvancedViewDialog
-from db import get_table_columns, get_connection, get_auxiliary_items
+from types_dialog import TypesManagerDialog
+from db import get_table_columns, get_connection, generate_test_data, insert_dynamic_data, get_enum_labels, get_composite_type_fields
 
 
 class InputDialog(QDialog):
     """
     Модальное окно для ввода данных эксперимента
     
-    Модальное окно блокирует родительское окно до закрытия
+    Теперь оно ДИНАМИЧЕСКОЕ: само смотрит какие есть колонки в базе
+    и создает для них поля ввода.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Добавить данные")
-        self.setModal(True)  # Блокируем родительское окно
-        self.setMinimumWidth(300)
+        self.setModal(True)
+        self.setMinimumWidth(400)
         
-        # Создаем форму для ввода
-        layout = QFormLayout()
+        main_layout = QVBoxLayout()
         
-        # Поле для названия эксперимента
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("Например: Тест SYN атаки")
-        layout.addRow("Название:", self.name_edit)
+        # Выбор таблицы
+        table_layout = QHBoxLayout()
+        table_layout.addWidget(QLabel("Таблица:"))
+        self.table_combo = QComboBox()
+        self.populate_tables()
+        self.table_combo.currentTextChanged.connect(self.build_form)
+        table_layout.addWidget(self.table_combo)
+        main_layout.addLayout(table_layout)
         
-        # Выпадающий список для выбора типа атаки
-        # Используем те же типы что и в БД
-        self.attack_combo = QComboBox()
-        self.attack_combo.addItems(ATTACK_TYPES)
-        layout.addRow("Тип атаки:", self.attack_combo)
-        
-        # Поле для количества пакетов
-        self.packets_edit = QLineEdit()
-        self.packets_edit.setPlaceholderText("Например: 1000")
-        layout.addRow("Пакетов:", self.packets_edit)
-        
-        # Поле для длительности
-        self.duration_edit = QLineEdit()
-        self.duration_edit.setPlaceholderText("Например: 10.5")
-        layout.addRow("Длительность (сек):", self.duration_edit)
-        
-        # Поле для даты
-        self.date_edit = QDateEdit()
-        self.date_edit.setDate(QDate.currentDate())  # По умолчанию сегодня
-        self.date_edit.setCalendarPopup(True)  # Показываем календарь
-        layout.addRow("Дата:", self.date_edit)
-        
-        # Связь с вспомогательной таблицей
-        self.aux_combo = QComboBox()
-        self.aux_combo.addItem("Не выбрано", None)
-        try:
-            for item in get_auxiliary_items():
-                display = f"{item['label']} · {item['segment_code']} ({item['criticality']})"
-                self.aux_combo.addItem(display, item["id"])
-        except Exception:
-            pass
-        layout.addRow("Связь (вспомогательная):", self.aux_combo)
+        # Форма для полей
+        self.form_layout = QFormLayout()
+        self.widgets = {} # Словарь для хранения виджетов {col_name: widget}
+        main_layout.addLayout(self.form_layout)
         
         # Кнопки
+        btn_layout = QHBoxLayout()
         btn_save = QPushButton("Сохранить")
         btn_save.clicked.connect(self.save)
         btn_cancel = QPushButton("Отмена")
-        btn_cancel.clicked.connect(self.reject)  # Закрываем окно без сохранения
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_save)
+        btn_layout.addWidget(btn_cancel)
         
-        # Основной layout
-        main_layout = QVBoxLayout()
-        main_layout.addLayout(layout)
-        main_layout.addWidget(btn_save)
-        main_layout.addWidget(btn_cancel)
+        main_layout.addLayout(btn_layout)
         self.setLayout(main_layout)
+        
+        # Строим форму для первой таблицы
+        self.build_form()
     
-    def validate_data(self):
-        """
-        Проверить корректность введенных данных
+    def get_schema_tables(self):
+        conn = get_connection()
+        if not conn:
+            return []
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema='ddos' AND table_type='BASE TABLE'
+                ORDER BY table_name
+            """)
+            tables = [row[0] for row in cur.fetchall()]
+            cur.close()
+            return tables
+        except Exception:
+            return []
+
+    def populate_tables(self):
+        tables = self.get_schema_tables()
+        if not tables:
+            tables = ["experiments"] # Fallback
+        self.table_combo.addItems(tables)
         
-        Returns:
-            Список ошибок (пустой если все ОК)
-        """
-        errors = []
+    def build_form(self):
+        """Перестроить форму в зависимости от выбранной таблицы"""
+        # Очистить текущую форму
+        while self.form_layout.rowCount() > 0:
+            self.form_layout.removeRow(0)
+        self.widgets.clear()
         
-        # Получаем значения из полей
-        name = self.name_edit.text().strip()
-        packets = self.packets_edit.text().strip()
-        duration = self.duration_edit.text().strip()
+        table_name = self.table_combo.currentText()
+        if not table_name:
+            return
+
+        # Получаем структуру таблицы из БД
+        columns_info = get_table_columns(table_name)
         
-        # Проверка 1: Название
-        if not name:
-            errors.append("Поле 'Название' не заполнено")
-        elif len(name) > 255:
-            errors.append(f"Поле 'Название' слишком длинное (максимум 255 символов, введено {len(name)})")
-        
-        # Проверка 2: Пакеты (должно быть целое число)
-        if not packets:
-            errors.append("Поле 'Пакетов' не заполнено")
-        else:
-            try:
-                packets_int = int(packets)
-                if packets_int <= 0:
-                    errors.append("Поле 'Пакетов' должно быть больше 0")
-                elif packets_int > 2147483647:  # Максимум для INTEGER в PostgreSQL
-                    errors.append(f"Поле 'Пакетов' слишком большое (максимум 2147483647, введено {packets_int})")
-            except ValueError:
-                errors.append(f"Поле 'Пакетов' должно быть целым числом (введено: '{packets}')")
-        
-        # Проверка 3: Длительность (должно быть число)
-        if not duration:
-            errors.append("Поле 'Длительность' не заполнено")
-        else:
-            try:
-                duration_float = float(duration)
-                if duration_float <= 0:
-                    errors.append("Поле 'Длительность' должно быть больше 0")
-                elif duration_float > 99999999.99:  # Максимум для DECIMAL(10,2)
-                    errors.append(f"Поле 'Длительность' слишком большое (максимум 99999999.99, введено {duration_float})")
-            except ValueError:
-                errors.append(f"Поле 'Длительность' должно быть числом (введено: '{duration}')")
-        
-        return errors
-    
-    def save(self):
-        """Сохранить данные в базу"""
-        # Валидация данных перед сохранением
-        errors = self.validate_data()
-        
-        # Если есть ошибки - показываем их все
-        if errors:
-            error_text = "Обнаружены ошибки:\n\n"
-            for i, error in enumerate(errors, 1):
-                error_text += f"{i}. {error}\n"
-            QMessageBox.warning(self, "Ошибки ввода", error_text)
+        if not columns_info:
+            # Если колонок нет (или таблица не найдена), ничего не добавляем
             return
         
-        # Если валидация прошла - получаем значения
-        name = self.name_edit.text().strip()
-        attack_type = self.attack_combo.currentText()
-        packets = self.packets_edit.text().strip()
-        duration = self.duration_edit.text().strip()
-        date = self.date_edit.date().toString("yyyy-MM-dd")
-        aux_id = self.aux_combo.currentData()
-        
-        # Пытаемся сохранить данные
-        try:
-            success, msg = insert_data(name, attack_type, packets, duration, date, aux_id)
-            if success:
-                QMessageBox.information(self, "Успех", msg)
-                self.accept()  # Закрываем окно с успехом
+        for col_name, data_type, is_nullable, default, udt_name in columns_info:
+            # Пропускаем ID, так как он автоинкремент (SERIAL)
+            if col_name == 'id':
+                continue
+                
+            label = COLUMN_LABELS.get(col_name, col_name)
+            widget = None
+            
+            # 1. ENUM или COMPOSITE (Пользовательские типы)
+            if data_type == 'USER-DEFINED': 
+                # Пытаемся получить допустимые значения из БД (для ENUM)
+                enum_values = get_enum_labels(udt_name)
+                
+                if enum_values:
+                    # Это ENUM
+                    widget = QComboBox()
+                    widget.addItems(enum_values)
+                else:
+                    # Проверяем, может это составной тип?
+                    comp_fields = get_composite_type_fields(udt_name)
+                    if comp_fields:
+                        # Это Составной тип! Рисуем под-форму
+                        group = QGroupBox(f"{label} ({udt_name})")
+                        group_layout = QFormLayout()
+                        sub_widgets = {}
+                        
+                        for field_name, field_type in comp_fields:
+                            sub_widget = QLineEdit()
+                            sub_widget.setPlaceholderText(field_type)
+                            group_layout.addRow(f"{field_name}:", sub_widget)
+                            sub_widgets[field_name] = sub_widget
+                            
+                        group.setLayout(group_layout)
+                        # Сохраняем не сам виджет, а словарь виджетов, чтобы потом собрать
+                        # Используем специальный класс-обертку или просто пометим
+                        widget = group
+                        widget.sub_widgets = sub_widgets # Прикрепляем ссылки
+                        widget.is_composite = True
+                    else:
+                        # Если не нашли значений и полей (возможно это не ENUM и не COMPOSITE или ошибка),
+                        # проверяем хардкод для attack_type на всякий случай
+                        if col_name == 'attack_type':
+                            widget = QComboBox()
+                            widget.addItems(ATTACK_TYPES)
+                        else:
+                            # Иначе просто текстовое поле
+                            widget = QLineEdit()
+            
+            # 1.1 Специальное поле Criticality (хоть оно и varchar, но там CHECK constraint)
+            elif col_name == 'criticality':
+                widget = QComboBox()
+                widget.addItems(['LOW', 'MEDIUM', 'HIGH'])
+                
+            # 2. Foreign Key (Связь с целью)
+            elif col_name == 'auxiliary_id':
+                widget = QComboBox()
+                widget.addItem("Не выбрано", None)
+                try:
+                    for item in get_auxiliary_items():
+                        display = f"{item['label']} · {item['segment_code']} ({item['criticality']})"
+                        widget.addItem(display, item["id"])
+                except Exception:
+                    pass
+            
+            # 3. Числа (Integer)
+            elif data_type in ('integer', 'smallint', 'bigint'):
+                widget = QSpinBox()
+                widget.setRange(0, 2147483647)
+                # Если это packets, ставим дефолт
+                if col_name == 'packets':
+                    widget.setValue(1000)
+                    widget.setRange(1, 2147483647) # CHECK packets > 0
+                
+            # 4. Дробные (Decimal, Real)
+            elif data_type in ('numeric', 'decimal', 'real', 'double precision'):
+                widget = QDoubleSpinBox()
+                widget.setRange(0.0, 99999999.99)
+                widget.setDecimals(2)
+                # Если duration
+                if col_name == 'duration':
+                    widget.setValue(10.0)
+                    
+            # 5. Дата/Время
+            elif 'timestamp' in data_type or 'date' in data_type:
+                widget = QDateEdit()
+                widget.setDate(QDate.currentDate())
+                widget.setCalendarPopup(True)
+                
+            # 6. Булево
+            elif data_type == 'boolean':
+                widget = QCheckBox("Да/Нет")
+                
+            # 7. Текст (все остальное)
             else:
-                QMessageBox.critical(self, "Ошибка", msg)
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка при сохранении: {str(e)}")
+                widget = QLineEdit()
+                if col_name == 'name':
+                    widget.setPlaceholderText("Например: Тест-1")
+                
+            if widget:
+                self.widgets[col_name] = widget
+                self.form_layout.addRow(f"{label}:", widget)
+    
+    def save(self):
+        """Собираем данные из виджетов и сохраняем"""
+        table_name = self.table_combo.currentText()
+        if not table_name:
+            return
+
+        data = {}
+        errors = []
+        
+        for col_name, widget in self.widgets.items():
+            val = None
+            
+            # Обработка составного типа
+            if getattr(widget, 'is_composite', False):
+                # Собираем значения полей в строку (val1, val2)
+                # Важно: если значение содержит запятые или скобки, его надо экранировать в кавычки
+                parts = []
+                all_empty = True
+                for s_name, s_widget in widget.sub_widgets.items():
+                    s_val = s_widget.text().strip()
+                    if s_val:
+                        all_empty = False
+                    # Экранирование для композитного типа
+                    if ',' in s_val or '(' in s_val or ')' in s_val or '"' in s_val or '\\' in s_val or ' ' in s_val:
+                         s_val = '"' + s_val.replace('"', '""') + '"'
+                    parts.append(s_val)
+                
+                if all_empty:
+                    val = None
+                else:
+                    # Формат PostgreSQL: (val1,val2,...)
+                    val = "(" + ",".join(parts) + ")"
+            
+            elif isinstance(widget, QLineEdit):
+                text = widget.text().strip()
+                if not text:
+                    val = None
+                else:
+                    val = text
+            
+            elif isinstance(widget, QComboBox):
+                if col_name == 'auxiliary_id':
+                    val = widget.currentData()
+                else:
+                    val = widget.currentText()
+            
+            elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+                val = widget.value()
+                
+            elif isinstance(widget, QDateEdit):
+                val = widget.date().toString("yyyy-MM-dd")
+                
+            elif isinstance(widget, QCheckBox):
+                val = widget.isChecked()
+            
+            # Проверка обязательных полей (упрощенная)
+            if col_name == 'name' and not val:
+                 errors.append("Поле 'Название' обязательно")
+            
+            data[col_name] = val
+            
+        if errors:
+            QMessageBox.warning(self, "Ошибка", "\n".join(errors))
+            return
+
+        success, msg = insert_dynamic_data(table_name, data)
+        
+        if success:
+            QMessageBox.information(self, "Успех", msg)
+            self.accept()
+        else:
+            QMessageBox.critical(self, "Ошибка БД", msg)
 
 
 class ViewDialog(QDialog):
@@ -208,8 +324,16 @@ class ViewDialog(QDialog):
         btn_apply = QPushButton("Применить")
         btn_apply.clicked.connect(self.load_data)
         
+        # Кнопка сброса фильтров
+        btn_reset = QPushButton("Сбросить фильтры")
+        btn_reset.clicked.connect(self.reset_filters)
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addWidget(btn_apply)
+        btn_layout.addWidget(btn_reset)
+        
         layout.addLayout(filter_layout)
-        layout.addWidget(btn_apply)
+        layout.addLayout(btn_layout)
         
         # Блок подзапросов
         self.setup_subquery_group(layout)
@@ -226,6 +350,14 @@ class ViewDialog(QDialog):
         self.setLayout(layout)
         
         # Загружаем данные при открытии окна
+        self.load_data()
+
+    def reset_filters(self):
+        """Сбросить все фильтры и перезагрузить данные."""
+        self.attack_filter.setCurrentIndex(0)
+        self.date_from.setDate(QDate.currentDate().addDays(-30))
+        self.date_to.setDate(QDate.currentDate())
+        self.subquery_type.setCurrentIndex(0)
         self.load_data()
 
     def populate_tables(self):
@@ -256,40 +388,42 @@ class ViewDialog(QDialog):
         group = QGroupBox("Фильтр с подзапросом")
         form = QFormLayout()
         
+        from PySide6.QtWidgets import QHBoxLayout
+        
         self.subquery_type = QComboBox()
         self.subquery_type.addItem("Не использовать", None)
-        self.subquery_type.addItem("EXISTS", "EXISTS")
-        self.subquery_type.addItem("NOT EXISTS", "NOT EXISTS")
-        self.subquery_type.addItem("ANY", "ANY")
-        self.subquery_type.addItem("ALL", "ALL")
+        self.subquery_type.addItem("EXISTS (Существует)", "EXISTS")
+        self.subquery_type.addItem("NOT EXISTS (Не существует)", "NOT EXISTS")
+        self.subquery_type.addItem("ANY (Любой из...)", "ANY")
+        self.subquery_type.addItem("ALL (Каждый из...)", "ALL")
         form.addRow("Тип фильтра:", self.subquery_type)
         
         self.outer_column_combo = QComboBox()
-        form.addRow("Колонка основной таблицы:", self.outer_column_combo)
+        form.addRow("Искать по полю:", self.outer_column_combo)
         
         self.subquery_operator = QComboBox()
         self.subquery_operator.addItems(["=", "<>", ">", ">=", "<", "<="])
-        form.addRow("Оператор:", self.subquery_operator)
+        form.addRow("Оператор сравнения:", self.subquery_operator)
         
         self.subquery_table_combo = QComboBox()
         self.subquery_table_combo.currentIndexChanged.connect(self.populate_subquery_columns)
-        form.addRow("Таблица подзапроса:", self.subquery_table_combo)
+        form.addRow("Где искать (Таблица):", self.subquery_table_combo)
         
         self.subquery_column_combo = QComboBox()
-        form.addRow("Колонка подзапроса:", self.subquery_column_combo)
+        form.addRow("Поле подзапроса:", self.subquery_column_combo)
         
         self.subquery_link_column_combo = QComboBox()
-        form.addRow("Колонка для связи:", self.subquery_link_column_combo)
+        form.addRow("Связующее поле (ID):", self.subquery_link_column_combo)
         
         self.subquery_filter_column_combo = QComboBox()
-        form.addRow("Фильтр по колонке:", self.subquery_filter_column_combo)
+        form.addRow("Условие (Поле):", self.subquery_filter_column_combo)
         
         self.subquery_filter_operator = QComboBox()
         self.subquery_filter_operator.addItems(["=", "<>", ">", ">=", "<", "<="])
-        form.addRow("Оператор фильтра:", self.subquery_filter_operator)
+        form.addRow("Условие (Оператор):", self.subquery_filter_operator)
         
         self.subquery_filter_value = QLineEdit()
-        form.addRow("Значение фильтра:", self.subquery_filter_value)
+        form.addRow("Условие (Значение):", self.subquery_filter_value)
         
         group.setLayout(form)
         layout.addWidget(group)
@@ -346,15 +480,48 @@ class ViewDialog(QDialog):
         compare_mode = mode in ("ANY", "ALL")
         exists_mode = mode in ("EXISTS", "NOT EXISTS")
         
-        self.outer_column_combo.setEnabled(has_filter)
-        self.subquery_table_combo.setEnabled(has_filter)
-        self.subquery_column_combo.setEnabled(has_filter)
-        self.subquery_filter_column_combo.setEnabled(has_filter)
-        self.subquery_filter_operator.setEnabled(has_filter)
-        self.subquery_filter_value.setEnabled(has_filter)
+        # Общая видимость блока (кроме селектора типа)
+        self.outer_column_combo.setVisible(has_filter and compare_mode)
+        self.subquery_table_combo.setVisible(has_filter)
+        self.subquery_column_combo.setVisible(has_filter and compare_mode)
+        self.subquery_filter_column_combo.setVisible(has_filter)
+        self.subquery_filter_operator.setVisible(has_filter)
+        self.subquery_filter_value.setVisible(has_filter)
         
-        self.subquery_operator.setEnabled(compare_mode)
-        self.subquery_link_column_combo.setEnabled(exists_mode)
+        self.subquery_operator.setVisible(compare_mode)
+        self.subquery_link_column_combo.setVisible(exists_mode)
+        
+        # Обновление лейблов (скрываем строки формы по индексам добавления)
+        layout = self.subquery_type.parent().layout()
+        if layout:
+            # 0: Type (всегда виден)
+            # 1: Outer Column (Искать по полю) -> ANY/ALL
+            # 2: Operator (Оператор сравнения) -> ANY/ALL
+            # 3: Table (Где искать) -> ВСЕГДА при наличии типа
+            # 4: Sub Column (Поле подзапроса) -> ANY/ALL
+            # 5: Link Column (Связующее поле) -> EXISTS
+            # 6: Filter Column (Условие Поле) -> ВСЕГДА при наличии типа
+            # 7: Filter Op (Условие Оператор) -> ВСЕГДА при наличии типа
+            # 8: Filter Val (Условие Значение) -> ВСЕГДА при наличии типа
+            
+            # Сначала скрываем всё кроме типа (0)
+            for i in range(1, layout.rowCount()):
+                layout.setRowVisible(i, False)
+            
+            if has_filter:
+                layout.setRowVisible(3, True) # Table
+                layout.setRowVisible(6, True) # Filter Col
+                layout.setRowVisible(7, True) # Filter Op
+                layout.setRowVisible(8, True) # Filter Val
+                
+                if compare_mode:
+                    layout.setRowVisible(1, True) # Outer Col
+                    layout.setRowVisible(2, True) # Op
+                    layout.setRowVisible(4, True) # Sub Col
+                
+                if exists_mode:
+                    layout.setRowVisible(1, True) # Outer Col (нужен для связи)
+                    layout.setRowVisible(5, True) # Link Col
 
     def update_outer_columns(self, columns):
         self.outer_column_combo.clear()
@@ -509,6 +676,16 @@ class MainWindow(QMainWindow):
         btn_advanced = QPushButton("Расширенный просмотр")
         btn_advanced.clicked.connect(self.on_advanced)
         layout.addWidget(btn_advanced)
+
+        # Кнопка 6: Управление типами
+        btn_types = QPushButton("Управление типами")
+        btn_types.clicked.connect(self.on_types)
+        layout.addWidget(btn_types)
+    
+        # Кнопка 7: Генерация тестовых данных
+        btn_gen = QPushButton("Генерация тестовых данных")
+        btn_gen.clicked.connect(self.on_generate)
+        layout.addWidget(btn_gen)
     
     def on_create(self):
         """Обработчик нажатия кнопки 'Создать базу'"""
@@ -557,3 +734,22 @@ class MainWindow(QMainWindow):
         dialog = AdvancedViewDialog(self)
         dialog.exec()
 
+    def on_types(self):
+        """Обработчик нажатия кнопки 'Управление типами'"""
+        dialog = TypesManagerDialog(self)
+        dialog.exec()
+
+    def on_generate(self):
+        """Обработчик нажатия кнопки 'Генерация тестовых данных'"""
+        reply = QMessageBox.question(
+            self, 
+            "Подтверждение", 
+            "Сгенерировать 15 случайных записей в таблице экспериментов?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            success, msg = generate_test_data()
+            if success:
+                QMessageBox.information(self, "Успех", msg)
+            else:
+                QMessageBox.critical(self, "Ошибка", msg)

@@ -3,6 +3,8 @@
 """
 import psycopg2
 import logging
+import random
+from datetime import datetime, timedelta
 from config import DB_CONFIG, ATTACK_TYPES
 
 # Глобальная переменная для хранения подключения
@@ -48,6 +50,7 @@ def schema_exists():
         cur.close()
         return exists
     except Exception as e:
+        conn.rollback()
         logging.error(f"Ошибка проверки схемы: {e}")
         return False
 
@@ -119,7 +122,7 @@ def create_schema():
                     REFERENCES ddos."вспомогательная"(id)
                     ON UPDATE CASCADE
                     ON DELETE SET NULL
-            );
+                );
         """)
         
         # Сохраняем изменения
@@ -159,50 +162,53 @@ def drop_schema():
         return False, f"Ошибка удаления схемы: {str(e)}"
 
 
-def insert_data(name, attack_type, packets, duration, date=None, auxiliary_id=None):
+
+def insert_dynamic_data(table_name, data_dict):
     """
-    Вставить данные в таблицу experiments
+    Динамическая вставка данных в любую таблицу.
     
     Args:
-        name: Название эксперимента
-        attack_type: Тип атаки (из ATTACK_TYPES)
-        packets: Количество пакетов
-        duration: Длительность в секундах
-        date: Дата в формате YYYY-MM-DD (если None - используется текущая дата)
-    
-    Returns:
-        Кортеж (успех: bool, сообщение: str)
+        table_name: Имя таблицы (например, 'experiments')
+        data_dict: Словарь {column_name: value}
     """
     conn = get_connection()
     if not conn:
         return False, "Нет подключения к БД"
-    
+        
     try:
         cur = conn.cursor()
         
-        # Если дата указана - используем её, иначе текущая дата/время
-        if date:
-            cur.execute("""
-                INSERT INTO ddos.experiments (name, attack_type, packets, duration, created_at, auxiliary_id)
-                VALUES (%s, %s, %s, %s, %s::timestamp, %s)
-            """, (name, attack_type, int(packets), float(duration), date, auxiliary_id))
-        else:
-            cur.execute("""
-                INSERT INTO ddos.experiments (name, attack_type, packets, duration, auxiliary_id)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (name, attack_type, int(packets), float(duration), auxiliary_id))
+        # Фильтруем None значения (пусть база ставит NULL или DEFAULT)
+        # НО! Для некоторых колонок None может быть явным NULL. 
+        # Оставим как есть, psycopg2 умеет конвертировать None в NULL.
         
-        # Сохраняем изменения
+        cols = []
+        vals = []
+        placeholders = []
+        
+        for col, val in data_dict.items():
+            cols.append(quote_ident(col))
+            vals.append(val)
+            placeholders.append("%s")
+            
+        if not cols:
+            return False, "Нет данных для вставки"
+            
+        col_str = ", ".join(cols)
+        ph_str = ", ".join(placeholders)
+        
+        query = f"INSERT INTO ddos.{quote_ident(table_name)} ({col_str}) VALUES ({ph_str})"
+        
+        cur.execute(query, tuple(vals))
         conn.commit()
         cur.close()
-        logging.info(f"Данные добавлены: {name}")
         return True, "Данные успешно добавлены"
         
     except Exception as e:
-        # Откатываем изменения при ошибке
         conn.rollback()
-        logging.error(f"Ошибка вставки: {e}")
+        logging.error(f"Ошибка вставки в {table_name}: {e}")
         return False, str(e)
+
 
 
 def get_auxiliary_items():
@@ -231,6 +237,7 @@ def get_auxiliary_items():
             for row in rows
         ]
     except Exception as e:
+        conn.rollback()
         logging.error(f"Ошибка получения 'вспомогательная': {e}")
         return []
 
@@ -282,6 +289,7 @@ def get_data(attack_type_filter=None, date_from=None, date_to=None, table_name=N
         cur.close()
         return rows
     except Exception as e:
+        conn.rollback()
         logging.error(f'Ошибка получения данных: {e}')
         return []
 
@@ -295,7 +303,7 @@ def get_table_columns(table_name='experiments'):
     try:
         cur = conn.cursor()
         cur.execute("""
-            SELECT column_name, data_type, is_nullable, column_default
+            SELECT column_name, data_type, is_nullable, column_default, udt_name
             FROM information_schema.columns
             WHERE table_schema = 'ddos' AND table_name = %s
             ORDER BY ordinal_position;
@@ -304,9 +312,61 @@ def get_table_columns(table_name='experiments'):
         cur.close()
         return columns
     except Exception as e:
+        conn.rollback()
         logging.error(f"Ошибка получения столбцов: {e}")
         return []
 
+def get_enum_labels(type_name):
+    """
+    Получить все возможные значения (labels) для перечислимого типа (ENUM)
+    """
+    conn = get_connection()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        # Ищем в ddos схеме
+        cur.execute("""
+            SELECT e.enumlabel
+            FROM pg_enum e
+            JOIN pg_type t ON e.enumtypid = t.oid
+            JOIN pg_namespace n ON t.typnamespace = n.oid
+            WHERE t.typname = %s AND n.nspname = 'ddos'
+            ORDER BY e.enumsortorder;
+        """, (type_name,))
+        rows = cur.fetchall()
+        cur.close()
+        return [r[0] for r in rows]
+    except Exception as e:
+        conn.rollback()
+        logging.error(f"Ошибка получения значений enum {type_name}: {e}")
+        return []
+
+def get_composite_type_fields(type_name):
+    """
+    Получить поля составного типа (Composite Type)
+    Returns: [(field_name, field_type), ...]
+    """
+    conn = get_connection()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+            FROM pg_type t
+            JOIN pg_attribute a ON a.attrelid = t.typrelid
+            JOIN pg_namespace n ON t.typnamespace = n.oid
+            WHERE t.typname = %s AND n.nspname = 'ddos'
+            ORDER BY a.attnum;
+        """, (type_name,))
+        rows = cur.fetchall()
+        cur.close()
+        return rows
+    except Exception as e:
+        conn.rollback()
+        logging.error(f"Ошибка получения полей составного типа {type_name}: {e}")
+        return []
 
 def execute_alter_table(sql_command):
     """
@@ -378,3 +438,66 @@ def execute_custom_query(query, params=None):
         logging.error(f"Ошибка выполнения запроса: {e}")
         return False, [], str(e)
 
+def generate_test_data():
+    """
+    Генерация тестовых данных для демонстрации функционала.
+    """
+    conn = get_connection()
+    if not conn:
+        return False, "Нет подключения к БД"
+        
+    if not schema_exists():
+        return False, "Схема не создана. Сначала нажмите 'Создать базу'."
+    
+    try:
+        cur = conn.cursor()
+        
+        # 1. Получаем список ID целей (вспомогательная таблица)
+        cur.execute('SELECT id FROM ddos."вспомогательная"')
+        aux_ids = [row[0] for row in cur.fetchall()]
+        
+        # Если целей нет, создаем пару дефолтных
+        if not aux_ids:
+            cur.execute("""
+                INSERT INTO ddos."вспомогательная"(segment_code, label, location, purpose, criticality)
+                VALUES
+                    ('TEST-A', 'Тестовый сервер 1', 'Москва', 'Тесты', 'LOW'),
+                    ('PROD-B', 'Продакшн сервер', 'СПб', 'Клиенты', 'HIGH')
+                RETURNING id
+            """)
+            aux_ids = [row[0] for row in cur.fetchall()]
+        
+        # 2. Генерируем 15 случайных экспериментов
+        # Проверяем, какие колонки реально существуют
+        real_cols = [c[0] for c in get_table_columns('experiments')]
+        
+        for i in range(15):
+            attack = random.choice(ATTACK_TYPES)
+            packets = random.randint(100, 50000)
+            duration = round(random.uniform(1.0, 60.0), 2)
+            
+            # Случайная дата за последний месяц
+            days_ago = random.randint(0, 30)
+            date_val = datetime.now() - timedelta(days=days_ago)
+            date_str = date_val.strftime("%Y-%m-%d")
+            
+            # Случайная цель (иногда NULL)
+            aux_id = random.choice(aux_ids + [None])
+            
+            name = f"AutoTest_{attack}_{i}_{random.randint(1000,9999)}"
+            
+            # Собираем данные только для существующих колонок
+            data = {}
+            if 'name' in real_cols: data['name'] = name
+            if 'attack_type' in real_cols: data['attack_type'] = attack
+            if 'packets' in real_cols: data['packets'] = packets
+            if 'duration' in real_cols: data['duration'] = duration
+            if 'created_at' in real_cols: data['created_at'] = date_str
+            if 'auxiliary_id' in real_cols: data['auxiliary_id'] = aux_id
+            
+            insert_dynamic_data("experiments", data)
+            
+        return True, "Тестовые данные успешно сгенерированы (15 записей)"
+        
+    except Exception as e:
+        return False, f"Ошибка генерации: {e}"
