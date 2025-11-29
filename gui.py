@@ -7,12 +7,12 @@ from PySide6.QtWidgets import (
     QMessageBox, QDateEdit, QGroupBox, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel
 )
 from PySide6.QtCore import QDate, Qt
-from db import create_schema, drop_schema, get_data, get_auxiliary_items
+from db import create_schema, drop_schema, insert_data, get_data, get_auxiliary_items
 from config import ATTACK_TYPES
 from alter_dialog import AlterTableDialog, COLUMN_LABELS
 from advanced_view_dialog import AdvancedViewDialog
 from types_dialog import TypesManagerDialog
-from db import get_table_columns, get_connection, generate_test_data, insert_dynamic_data, get_enum_labels, get_composite_type_fields
+from db import get_table_columns, get_connection, get_auxiliary_items, insert_auxiliary_data, generate_test_data, insert_dynamic_data, get_enum_labels, get_composite_type_fields
 
 
 class InputDialog(QDialog):

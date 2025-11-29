@@ -1,8 +1,4 @@
-"""
-Расширенное окно для работы с SELECT
-Включает: WHERE, ORDER BY, GROUP BY, HAVING, выбор столбцов,
-поиск по тексту, функции работы со строками, JOIN
-"""
+
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QPushButton,
     QComboBox, QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem,
@@ -76,8 +72,6 @@ class AdvancedViewDialog(QDialog):
         self.setLayout(layout)
     
     def setup_select_tab(self, tab):
-        """Настройка вкладки SELECT"""
-        # Создаем ScrollArea, так как настроек много
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         content_widget = QWidget()
@@ -243,10 +237,6 @@ class AdvancedViewDialog(QDialog):
         help_group = QGroupBox("Подсказка по шаблонам")
         help_layout = QVBoxLayout()
         help_label = QLabel(
-            "<b>LIKE:</b> Используйте <code>%</code> для любых символов.<br>"
-            "Пример: <code>Test%</code> найдет 'Test-1', 'Test-2'.<br><br>"
-            "<b>POSIX (~):</b> Используйте регулярные выражения.<br>"
-            "Пример: <code>^A.*[0-9]$</code> (Начинается на A, заканчивается цифрой)."
         )
         help_layout.addWidget(help_label)
         help_group.setLayout(help_layout)

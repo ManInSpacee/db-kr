@@ -3,8 +3,6 @@ import logging
 from PySide6.QtWidgets import QApplication
 from gui import MainWindow
 
-# Настройка логирования
-# Логи пишутся в файл app.log и выводятся в консоль
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',

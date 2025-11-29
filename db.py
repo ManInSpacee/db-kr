@@ -162,6 +162,19 @@ def drop_schema():
         return False, f"Ошибка удаления схемы: {str(e)}"
 
 
+def insert_data(name, attack_type, packets, duration, date=None, auxiliary_id=None):
+    """
+    Вставить данные в таблицу experiments (Старая версия для совместимости)
+    Используйте insert_dynamic_data для универсальности.
+    """
+    return insert_dynamic_data("experiments", {
+        "name": name,
+        "attack_type": attack_type,
+        "packets": packets,
+        "duration": duration,
+        "created_at": date,
+        "auxiliary_id": auxiliary_id
+    })
 
 def insert_dynamic_data(table_name, data_dict):
     """
@@ -209,6 +222,27 @@ def insert_dynamic_data(table_name, data_dict):
         logging.error(f"Ошибка вставки в {table_name}: {e}")
         return False, str(e)
 
+
+def insert_auxiliary_data(segment_code, label, location, purpose, criticality):
+    """
+    Вставить данные в таблицу 'вспомогательная'
+    """
+    conn = get_connection()
+    if not conn:
+        return False, "Нет подключения к БД"
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO ddos."вспомогательная" (segment_code, label, location, purpose, criticality)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (segment_code, label, location, purpose, criticality))
+        conn.commit()
+        cur.close()
+        return True, "Цель успешно добавлена"
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
 
 
 def get_auxiliary_items():
