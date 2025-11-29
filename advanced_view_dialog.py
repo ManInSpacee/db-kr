@@ -247,7 +247,7 @@ class AdvancedViewDialog(QDialog):
         layout.addWidget(btn_search)
         
         layout.addStretch()
-    
+    # LOL
     def setup_strings_tab(self, tab):
         """Настройка вкладки функций работы со строками"""
         layout = QVBoxLayout()

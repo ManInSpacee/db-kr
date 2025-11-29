@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from db import get_connection, execute_custom_query
-
+#lkdsjfldsf'ldsklf;sk
 class TypesManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)

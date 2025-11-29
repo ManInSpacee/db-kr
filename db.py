@@ -6,7 +6,7 @@ import logging
 import random
 from datetime import datetime, timedelta
 from config import DB_CONFIG, ATTACK_TYPES
-
+#f;sgjdlkfgjkdfkg;l
 # Глобальная переменная для хранения подключения
 conn = None
 

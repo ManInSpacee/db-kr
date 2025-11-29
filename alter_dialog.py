@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
 )
 from db import execute_alter_table, get_table_columns, get_connection
 
-
+#trash...
 # Словарь сопоставления: отображаемое имя ↔ SQL-имя (двустороннее)
 COLUMN_LABELS = {
     'id': 'ID',

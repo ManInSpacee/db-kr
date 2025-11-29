@@ -1,7 +1,7 @@
 """
 Конфигурация приложения
 """
-
+#sdifjldskfj
 # Параметры подключения к базе данных PostgreSQL
 DB_CONFIG = {
     'host': 'localhost',

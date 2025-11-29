@@ -14,7 +14,7 @@ from advanced_view_dialog import AdvancedViewDialog
 from types_dialog import TypesManagerDialog
 from db import get_table_columns, get_connection, get_auxiliary_items, insert_auxiliary_data, generate_test_data, insert_dynamic_data, get_enum_labels, get_composite_type_fields
 
-
+#sdfdsf
 class InputDialog(QDialog):
     """
     Модальное окно для ввода данных эксперимента
