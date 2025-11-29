@@ -44,7 +44,7 @@ def normalize_expression(expr: str) -> str:
     if expr.lower().startswith("where "):
         expr = expr[6:].strip()
     for sql_name, label in COLUMN_LABELS.items():
-        pattern = re.compile(rf"\\b{re.escape(label)}\\b", flags=re.IGNORECASE)
+        pattern = re.compile(rf"\b{re.escape(label)}\b", flags=re.IGNORECASE)
         expr = pattern.sub(sql_name, expr)
     return expr
 
@@ -75,9 +75,11 @@ class AlterTableDialog(QDialog):
         self.operation_combo.currentTextChanged.connect(self.update_form)
         form.addRow("Операция:", self.operation_combo)
         
-        self.table_edit = QLineEdit()
-        self.table_edit.setText("experiments")
-        form.addRow("Таблица:", self.table_edit)
+        # Замена QLineEdit на QComboBox для выбора таблицы
+        self.table_combo = QComboBox()
+        self.populate_tables()
+        self.table_combo.currentTextChanged.connect(self.update_form)
+        form.addRow("Таблица:", self.table_combo)
         
         layout.addLayout(form)
         
@@ -109,6 +111,15 @@ class AlterTableDialog(QDialog):
         
         self.setLayout(layout)
         self.update_form()
+
+    def populate_tables(self):
+        """Заполнить список таблиц"""
+        tables = self.get_existing_tables()
+        self.table_combo.clear()
+        if tables:
+            self.table_combo.addItems(tables)
+        else:
+            self.table_combo.addItem("experiments")
     
     def get_existing_tables(self):
         conn = get_connection()
@@ -127,16 +138,34 @@ class AlterTableDialog(QDialog):
         except Exception:
             return []
 
+    def get_user_types(self):
+        """Получить список пользовательских типов (ENUM и COMPOSITE)"""
+        conn = get_connection()
+        if not conn:
+            return []
+        try:
+            cur = conn.cursor()
+            # typtype: 'e' = enum, 'c' = composite
+            # Также важно исключить системные типы (начинаются с _)
+            cur.execute("""
+                SELECT t.typname, t.typtype
+                FROM pg_type t
+                JOIN pg_namespace n ON t.typnamespace = n.oid
+                WHERE n.nspname = 'ddos' 
+                  AND (t.typtype = 'e' OR (t.typtype = 'c' AND t.typrelid != 0))
+                  AND t.typname NOT LIKE '%%[]'
+                ORDER BY t.typname
+            """)
+            # Возвращаем список кортежей (имя, тип)
+            types = [(row[0], row[1]) for row in cur.fetchall()]
+            cur.close()
+            return types
+        except Exception:
+            return []
+
     def get_effective_table(self):
-        """Вернуть имя таблицы: если пользователь ввёл несуществующую, взять первую доступную."""
-        desired = self.table_edit.text().strip()
-        tables = self.get_existing_tables()
-        if desired and desired in tables:
-            return desired
-        if tables:
-            self.table_edit.setText(tables[0])
-            return tables[0]
-        return desired or "experiments"
+        """Вернуть текущую выбранную таблицу."""
+        return self.table_combo.currentText()
 
     def get_constraints_for_table(self, table_name):
         conn = get_connection()
@@ -164,14 +193,48 @@ class AlterTableDialog(QDialog):
         if widget is None:
             return default
         if isinstance(widget, QComboBox):
-            data = widget.currentData()
-            return data if data is not None else widget.currentText()
+            # Если у нас есть userData (например, для ENUM типов), берем его
+            # Но только если текущий текст совпадает с текстом элемента (пользователь не отредактировал его)
+            idx = widget.currentIndex()
+            if idx >= 0 and widget.itemText(idx) == widget.currentText():
+                data = widget.itemData(idx)
+                if data is not None:
+                    return data
+            
+            # Иначе возвращаем то, что написано (для ручного ввода типа INTEGER и т.д.)
+            return widget.currentText()
         if isinstance(widget, QLineEdit):
             return widget.text()
         if isinstance(widget, QCheckBox):
             return widget.isChecked()
         return default
     
+    def make_type_combo(self):
+        """Создать ComboBox с типами данных (стандартные + пользовательские)"""
+        combo = QComboBox()
+        combo.setEditable(True)
+        
+        # Стандартные
+        standard_types = [
+            "INTEGER", "VARCHAR(255)", "TEXT", "BOOLEAN", 
+            "TIMESTAMP", "DECIMAL(10,2)", "DATE"
+        ]
+        combo.addItems(standard_types)
+        
+        # Разделитель
+        combo.insertSeparator(len(standard_types))
+        
+        # Пользовательские
+        user_types = self.get_user_types()
+        for name, typtype in user_types:
+            # typtype 'e' -> ENUM, 'c' -> COMPOSITE
+            label_suffix = "ENUM" if typtype == 'e' else "COMPOSITE"
+            # Экранируем имя типа в кавычки для безопасности
+            safe_type_name = f'ddos."{name}"'
+            combo.addItem(f"{name} ({label_suffix})", safe_type_name)
+            
+        return combo
+
     def update_form(self):
         # Очищаем динамическую форму и виджеты
         while self.dynamic_form.rowCount() > 0:
@@ -186,7 +249,7 @@ class AlterTableDialog(QDialog):
         
         if operation == "Добавить столбец":
             self.dynamic_widgets['column_name'] = QLineEdit()
-            self.dynamic_widgets['column_type'] = QLineEdit()
+            self.dynamic_widgets['column_type'] = self.make_type_combo()
             self.dynamic_form.addRow("Имя столбца:", self.dynamic_widgets['column_name'])
             self.dynamic_form.addRow("Тип данных:", self.dynamic_widgets['column_type'])
         elif operation == "Удалить столбец":
@@ -199,7 +262,7 @@ class AlterTableDialog(QDialog):
             self.dynamic_form.addRow("Новое имя:", self.dynamic_widgets['new_name'])
         elif operation == "Изменить тип данных":
             self.dynamic_widgets['column_name'] = column_combo()
-            self.dynamic_widgets['new_type'] = QLineEdit()
+            self.dynamic_widgets['new_type'] = self.make_type_combo()
             self.dynamic_form.addRow("Имя столбца:", self.dynamic_widgets['column_name'])
             self.dynamic_form.addRow("Новый тип:", self.dynamic_widgets['new_type'])
         elif operation == "Добавить ограничение":
@@ -361,7 +424,10 @@ class AlterTableDialog(QDialog):
             new_type = self.widget_value('new_type').strip()
             if not col_name or not new_type:
                 return None
-            return f"ALTER TABLE {table_full} ALTER COLUMN {quote_identifier(col_name)} TYPE {new_type}"
+            quoted_col = quote_identifier(col_name)
+            # Добавляем USING clause для автоматического приведения типов (текст -> число и т.д.)
+            # Это решает ошибку "column cannot be cast automatically to type..."
+            return f"ALTER TABLE {table_full} ALTER COLUMN {quoted_col} TYPE {new_type} USING {quoted_col}::{new_type}"
             
         elif operation == "Удалить ограничение":
             const_name = self.widget_value('constraint_name').strip()
@@ -398,4 +464,3 @@ class AlterTableDialog(QDialog):
             self.accept()
         else:
             QMessageBox.critical(self, "Ошибка", f"Ошибка выполнения:\n{msg}")
-

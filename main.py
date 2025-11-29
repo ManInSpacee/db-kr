@@ -1,7 +1,3 @@
-"""
-Главный файл приложения
-Запускает графический интерфейс
-"""
 import sys
 import logging
 from PySide6.QtWidgets import QApplication
@@ -18,21 +14,13 @@ logging.basicConfig(
     ]
 )
 
-
 def main():
-    """
-    Главная функция приложения
-    Создает приложение Qt и главное окно
-    """
-    # Создаем приложение Qt
     app = QApplication(sys.argv)
     
     # Создаем главное окно
     window = MainWindow()
     window.show()
-    
-    # Запускаем цикл обработки событий
-    # Приложение будет работать пока не закроется
+
     sys.exit(app.exec())
 
 

@@ -6,9 +6,10 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QPushButton,
     QComboBox, QLineEdit, QTextEdit, QTableWidget, QTableWidgetItem,
-    QMessageBox, QLabel, QCheckBox, QTabWidget, QWidget, QGroupBox
+    QMessageBox, QLabel, QCheckBox, QTabWidget, QWidget, QGroupBox,
+    QScrollArea
 )
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import QDateEdit
 from db import execute_custom_query, get_table_columns, get_connection
 
@@ -23,9 +24,9 @@ class AdvancedViewDialog(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Расширенный просмотр данных")
+        self.setWindowTitle("Мастер создания запросов (Advanced View)")
         self.setModal(True)
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(1000, 750)
         
         layout = QVBoxLayout()
         
@@ -34,28 +35,33 @@ class AdvancedViewDialog(QDialog):
         
         # Вкладка 1: Базовый SELECT
         tab_select = QWidget()
-        tabs.addTab(tab_select, "SELECT")
+        tabs.addTab(tab_select, "Сборка данных (SELECT)")
         self.setup_select_tab(tab_select)
         
         # Вкладка 2: Поиск по тексту
         tab_search = QWidget()
-        tabs.addTab(tab_search, "Поиск")
+        tabs.addTab(tab_search, "Поиск текста")
         self.setup_search_tab(tab_search)
         
         # Вкладка 3: Функции строк
         tab_strings = QWidget()
-        tabs.addTab(tab_strings, "Строки")
+        tabs.addTab(tab_strings, "Работа со строками")
         self.setup_strings_tab(tab_strings)
         
         # Вкладка 4: JOIN
         tab_join = QWidget()
-        tabs.addTab(tab_join, "JOIN")
+        tabs.addTab(tab_join, "Связи таблиц (JOIN)")
         self.setup_join_tab(tab_join)
+        
+        # Вкладка 5: Условия и NULL (CASE, COALESCE)
+        tab_logic = QWidget()
+        tabs.addTab(tab_logic, "Логика и Условия")
+        self.setup_logic_tab(tab_logic)
         
         layout.addWidget(tabs)
         
         # Таблица для результатов
-        layout.addWidget(QLabel("Результаты:"))
+        layout.addWidget(QLabel("<b>Результат выполнения:</b>"))
         self.table = QTableWidget()
         layout.addWidget(self.table)
         
@@ -71,66 +77,123 @@ class AdvancedViewDialog(QDialog):
     
     def setup_select_tab(self, tab):
         """Настройка вкладки SELECT"""
-        layout = QVBoxLayout()
-        tab.setLayout(layout)
+        # Создаем ScrollArea, так как настроек много
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        scroll.setWidget(content_widget)
+        
+        # Главный Layout вкладки
+        tab_layout = QVBoxLayout()
+        tab_layout.addWidget(QLabel("<i>Соберите свою таблицу, выбрав источник данных, колонки и условия фильтрации.</i>"))
+        tab_layout.addWidget(scroll)
+        tab.setLayout(tab_layout)
 
-        # Выбор таблицы
+        # 1. Источник данных
+        group_source = QGroupBox("1. Источник данных")
+        src_layout = QHBoxLayout()
+        src_layout.addWidget(QLabel("Выберите таблицу:"))
         self.select_table_combo = QComboBox()
         self.populate_table_combo(self.select_table_combo)
-        layout.addWidget(QLabel("Таблица:"))
-        layout.addWidget(self.select_table_combo)
+        src_layout.addWidget(self.select_table_combo)
+        group_source.setLayout(src_layout)
+        layout.addWidget(group_source)
         
-        # Выбор столбцов
-        group_cols = QGroupBox("Выбор столбцов")
+        # 2. Выбор столбцов
+        group_cols = QGroupBox("2. Что показывать (Столбцы)")
         cols_layout = QVBoxLayout()
+        cols_layout.addWidget(QLabel("Введите имена столбцов через запятую (например: name, duration):"))
         self.columns_text = QTextEdit()
-        self.columns_text.setPlaceholderText("id, name, attack_type, packets, duration\nИли оставьте пустым для всех (*)")
-        self.columns_text.setMaximumHeight(60)
+        self.columns_text.setPlaceholderText("По умолчанию: * (все столбцы)")
+        self.columns_text.setMaximumHeight(50)
         cols_layout.addWidget(self.columns_text)
         group_cols.setLayout(cols_layout)
         layout.addWidget(group_cols)
         
-        # WHERE
-        group_where = QGroupBox("WHERE (условие фильтрации)")
-        where_layout = QVBoxLayout()
-        self.where_text = QLineEdit()
-        self.where_text.setPlaceholderText("packets > 1000 AND duration < 10")
-        where_layout.addWidget(self.where_text)
+        # 3. Фильтрация (WHERE)
+        group_where = QGroupBox("3. Фильтрация строк (WHERE)")
+        where_layout = QHBoxLayout()
+        
+        self.where_col = QComboBox()
+        self.populate_column_combo(self.where_col, self.select_table_combo.currentData())
+        
+        self.where_op = QComboBox()
+        self.where_op.addItems(["=", ">", ">=", "<", "<=", "<>", "LIKE"])
+        
+        self.where_val = QLineEdit()
+        self.where_val.setPlaceholderText("Значение (например: 100)")
+        
+        where_layout.addWidget(QLabel("Если поле:"))
+        where_layout.addWidget(self.where_col)
+        where_layout.addWidget(QLabel("Оператор:"))
+        where_layout.addWidget(self.where_op)
+        where_layout.addWidget(QLabel("Значение:"))
+        where_layout.addWidget(self.where_val)
+        
         group_where.setLayout(where_layout)
         layout.addWidget(group_where)
+
+        # Подключение обновления колонок
+        self.select_table_combo.currentIndexChanged.connect(
+            lambda: self.populate_column_combo(self.where_col, self.select_table_combo.currentData())
+        )
         
-        # ORDER BY
-        group_order = QGroupBox("ORDER BY (сортировка)")
-        order_layout = QFormLayout()
-        self.order_by_text = QLineEdit()
-        self.order_by_text.setPlaceholderText("packets DESC")
-        self.order_by_text.setText("created_at DESC")
-        order_layout.addRow("Сортировка:", self.order_by_text)
+        # 4. Сортировка (ORDER BY)
+        group_order = QGroupBox("4. Сортировка (ORDER BY)")
+        order_layout = QHBoxLayout()
+        
+        self.order_by_combo = QComboBox()
+        # include_empty=True для сортировки
+        self.populate_column_combo(self.order_by_combo, self.select_table_combo.currentData(), include_empty=True)
+        
+        self.order_direction = QComboBox()
+        self.order_direction.addItems(["По возрастанию (ASC)", "По убыванию (DESC)"])
+        
+        order_layout.addWidget(QLabel("Сортировать по:"))
+        order_layout.addWidget(self.order_by_combo)
+        order_layout.addWidget(self.order_direction)
+        
         group_order.setLayout(order_layout)
         layout.addWidget(group_order)
+
+        self.select_table_combo.currentIndexChanged.connect(
+            lambda: self.populate_column_combo(self.order_by_combo, self.select_table_combo.currentData(), include_empty=True)
+        )
         
-        # GROUP BY и HAVING
-        group_group = QGroupBox("GROUP BY и HAVING")
-        group_layout = QFormLayout()
-        self.group_by_text = QLineEdit()
-        self.group_by_text.setPlaceholderText("attack_type")
-        group_layout.addRow("GROUP BY:", self.group_by_text)
-        self.having_text = QLineEdit()
-        self.having_text.setPlaceholderText("COUNT(*) > 5")
-        group_layout.addRow("HAVING:", self.having_text)
-        group_group.setLayout(group_layout)
-        layout.addWidget(group_group)
-        
-        # Агрегатные функции
-        group_agg = QGroupBox("Агрегатные функции")
+        # 5. Группировка и Агрегация
+        group_agg = QGroupBox("5. Группировка и Статистика (GROUP BY / HAVING)")
         agg_layout = QFormLayout()
-        self.agg_func = QComboBox()
-        self.agg_func.addItems(["", "COUNT(*)", "SUM(packets)", "AVG(packets)", "MAX(packets)", "MIN(packets)"])
-        agg_layout.addRow("Функция:", self.agg_func)
+        
+        self.group_by_combo = QComboBox()
+        # include_empty=True для группировки (пункт будет "Не выбрано")
+        self.populate_column_combo(self.group_by_combo, self.select_table_combo.currentData(), include_empty=True)
+        agg_layout.addRow("Сгруппировать по полю:", self.group_by_combo)
+        
+        # HAVING
+        having_box = QHBoxLayout()
+        self.having_agg = QComboBox()
+        self.having_agg.addItems(["COUNT(*)", "SUM(packets)", "AVG(packets)", "MIN(packets)", "MAX(packets)"])
+        self.having_op = QComboBox()
+        self.having_op.addItems([">", ">=", "<", "<=", "=", "<>"])
+        self.having_val = QLineEdit()
+        self.having_val.setPlaceholderText("Например: 10")
+        
+        having_box.addWidget(self.having_agg)
+        having_box.addWidget(self.having_op)
+        having_box.addWidget(self.having_val)
+        
+        agg_layout.addRow("Условие для группы (HAVING):", having_box)
+        
         group_agg.setLayout(agg_layout)
         layout.addWidget(group_agg)
+
+        self.select_table_combo.currentIndexChanged.connect(
+            lambda: self.populate_column_combo(self.group_by_combo, self.select_table_combo.currentData(), include_empty=True)
+        )
         
-        btn_execute = QPushButton("Выполнить запрос")
+        btn_execute = QPushButton("ВЫПОЛНИТЬ ЗАПРОС")
+        btn_execute.setStyleSheet("font-weight: bold; padding: 5px;")
         btn_execute.clicked.connect(self.execute_select)
         layout.addWidget(btn_execute)
         
@@ -141,40 +204,55 @@ class AdvancedViewDialog(QDialog):
         layout = QVBoxLayout()
         tab.setLayout(layout)
         
-        layout.addWidget(QLabel("Таблица:"))
+        layout.addWidget(QLabel("<i>Поиск текстовых данных с использованием шаблонов и регулярных выражений.</i>"))
+        
+        form_group = QGroupBox("Параметры поиска")
+        form = QFormLayout()
+        
         self.search_table_combo = QComboBox()
         self.populate_table_combo(self.search_table_combo)
-        layout.addWidget(self.search_table_combo)
-        
-        form = QFormLayout()
+        form.addRow("Таблица:", self.search_table_combo)
         
         self.search_column = QComboBox()
         self.populate_column_combo(self.search_column, self.search_table_combo.currentData())
         self.search_table_combo.currentTextChanged.connect(
             lambda _: self.populate_column_combo(self.search_column, self.search_table_combo.currentData())
         )
-        form.addRow("Столбец:", self.search_column)
-        
-        self.search_pattern = QLineEdit()
-        self.search_pattern.setPlaceholderText("Введите шаблон поиска")
-        form.addRow("Шаблон:", self.search_pattern)
+        form.addRow("Поле для поиска:", self.search_column)
         
         self.search_type = QComboBox()
         self.search_type.addItems([
-            "LIKE",
-            "ILIKE (без учета регистра)",
-            "~ (POSIX регулярное выражение)",
-            "~* (POSIX без учета регистра)",
-            "!~ (не соответствует POSIX)",
-            "!~* (не соответствует POSIX, без регистра)"
+            "LIKE (Простой шаблон %)",
+            "ILIKE (Простой шаблон, без регистра)",
+            "~ (POSIX RegEx: Регулярное выражение)",
+            "~* (POSIX RegEx: Без учета регистра)",
+            "!~ (POSIX: НЕ соответствует)",
+            "!~* (POSIX: НЕ соответствует, без регистра)",
+            "SIMILAR TO (SQL Стандарт)",
+            "NOT SIMILAR TO (SQL Стандарт: НЕ соответствует)"
         ])
-        form.addRow("Тип поиска:", self.search_type)
+        form.addRow("Метод поиска:", self.search_type)
         
-        layout.addLayout(form)
+        self.search_pattern = QLineEdit()
+        self.search_pattern.setPlaceholderText("Например: ^Test.*")
+        form.addRow("Текст или шаблон:", self.search_pattern)
         
-        layout.addWidget(QLabel("Примеры:\nLIKE: 'test%' - начинается с test\n~: '^[A-Z]' - начинается с заглавной"))
+        form_group.setLayout(form)
+        layout.addWidget(form_group)
         
-        btn_search = QPushButton("Выполнить поиск")
+        help_group = QGroupBox("Подсказка по шаблонам")
+        help_layout = QVBoxLayout()
+        help_label = QLabel(
+            "<b>LIKE:</b> Используйте <code>%</code> для любых символов.<br>"
+            "Пример: <code>Test%</code> найдет 'Test-1', 'Test-2'.<br><br>"
+            "<b>POSIX (~):</b> Используйте регулярные выражения.<br>"
+            "Пример: <code>^A.*[0-9]$</code> (Начинается на A, заканчивается цифрой)."
+        )
+        help_layout.addWidget(help_label)
+        help_group.setLayout(help_layout)
+        layout.addWidget(help_group)
+        
+        btn_search = QPushButton("Найти")
         btn_search.clicked.connect(self.execute_search)
         layout.addWidget(btn_search)
         
@@ -185,32 +263,31 @@ class AdvancedViewDialog(QDialog):
         layout = QVBoxLayout()
         tab.setLayout(layout)
 
-        layout.addWidget(QLabel("Таблица:"))
+        layout.addWidget(QLabel("<i>Преобразование текста прямо в базе данных.</i>"))
+
+        group = QGroupBox("Настройка операции")
+        form = QFormLayout()
+
         self.strings_table_combo = QComboBox()
         self.populate_table_combo(self.strings_table_combo)
-        layout.addWidget(self.strings_table_combo)
-        
-        form = QFormLayout()
+        form.addRow("Таблица:", self.strings_table_combo)
         
         self.string_column = QComboBox()
         self.populate_column_combo(self.string_column, self.strings_table_combo.currentData())
         self.strings_table_combo.currentTextChanged.connect(
             lambda _: self.populate_column_combo(self.string_column, self.strings_table_combo.currentData())
         )
-        form.addRow("Столбец:", self.string_column)
+        form.addRow("Исходный столбец:", self.string_column)
         
         self.string_func = QComboBox()
         self.string_func.addItems([
-            "UPPER - верхний регистр",
-            "LOWER - нижний регистр",
-            "SUBSTRING - подстрока",
-            "TRIM - удалить пробелы",
-            "LTRIM - удалить слева",
-            "RTRIM - удалить справа",
-            "LPAD - дополнить слева",
-            "RPAD - дополнить справа",
-            "CONCAT - объединить",
-            "|| - оператор объединения"
+            "UPPER (Сделать ЗАГЛАВНЫМИ)",
+            "LOWER (сделать строчными)",
+            "TRIM (Удалить пробелы по краям)",
+            "SUBSTRING (Вырезать часть текста)",
+            "CONCAT (Объединить с другим текстом)",
+            "LPAD (Дополнить символами слева)",
+            "RPAD (Дополнить символами справа)"
         ])
         self.string_func.currentTextChanged.connect(self.update_string_params)
         form.addRow("Функция:", self.string_func)
@@ -223,9 +300,10 @@ class AdvancedViewDialog(QDialog):
         self.string_param2.setPlaceholderText("Параметр 2")
         form.addRow("Параметр 2:", self.string_param2)
         
-        layout.addLayout(form)
+        group.setLayout(form)
+        layout.addWidget(group)
         
-        btn_execute = QPushButton("Применить функцию")
+        btn_execute = QPushButton("Выполнить преобразование")
         btn_execute.clicked.connect(self.execute_strings)
         layout.addWidget(btn_execute)
         
@@ -236,12 +314,21 @@ class AdvancedViewDialog(QDialog):
         layout = QVBoxLayout()
         tab.setLayout(layout)
         
+        layout.addWidget(QLabel("<i>Объединение данных из двух таблиц по общему полю.</i>"))
+        
+        group = QGroupBox("Параметры соединения")
         form = QFormLayout()
         
         self.join_type = QComboBox()
-        self.join_type.addItems(["INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN"])
-        form.addRow("Тип JOIN:", self.join_type)
+        self.join_type.addItems([
+            "INNER JOIN (Только совпадения)", 
+            "LEFT JOIN (Все из левой + совпадения)", 
+            "RIGHT JOIN (Все из правой + совпадения)", 
+            "FULL JOIN (Все записи из обеих)"
+        ])
+        form.addRow("Тип связи:", self.join_type)
         
+        # Таблицы
         tables = self.get_schema_tables()
         if not tables:
             tables = ["experiments"]
@@ -249,17 +336,18 @@ class AdvancedViewDialog(QDialog):
         self.join_table1 = QComboBox()
         for table in tables:
             self.join_table1.addItem(table, table)
-        form.addRow("Таблица 1:", self.join_table1)
+        form.addRow("Левая таблица:", self.join_table1)
         
         self.join_table2 = QComboBox()
         for table in tables:
             self.join_table2.addItem(table, table)
-        form.addRow("Таблица 2:", self.join_table2)
+        form.addRow("Правая таблица:", self.join_table2)
         
+        # Поля
         self.join_field1 = QComboBox()
         self.join_field2 = QComboBox()
-        form.addRow("Поле таблицы 1:", self.join_field1)
-        form.addRow("Поле таблицы 2:", self.join_field2)
+        form.addRow("Поле связи (из левой):", self.join_field1)
+        form.addRow("Поле связи (из правой):", self.join_field2)
         
         self.join_table1.currentTextChanged.connect(lambda _: self.populate_join_fields(self.join_table1, self.join_field1))
         self.join_table2.currentTextChanged.connect(lambda _: self.populate_join_fields(self.join_table2, self.join_field2))
@@ -267,15 +355,79 @@ class AdvancedViewDialog(QDialog):
         self.populate_join_fields(self.join_table2, self.join_field2)
         
         self.join_columns = QTextEdit()
-        self.join_columns.setPlaceholderText("t1.*, t2.* или перечислите нужные поля")
-        self.join_columns.setMaximumHeight(60)
-        form.addRow("Столбцы:", self.join_columns)
+        self.join_columns.setPlaceholderText("По умолчанию: * (Все поля)")
+        self.join_columns.setMaximumHeight(50)
+        form.addRow("Какие поля показать:", self.join_columns)
         
-        layout.addLayout(form)
+        group.setLayout(form)
+        layout.addWidget(group)
         
-        btn_execute = QPushButton("Выполнить JOIN")
+        btn_execute = QPushButton("Объединить таблицы (JOIN)")
         btn_execute.clicked.connect(self.execute_join)
         layout.addWidget(btn_execute)
+        
+        layout.addStretch()
+
+    def setup_logic_tab(self, tab):
+        """Настройка вкладки Условия и NULL"""
+        layout = QVBoxLayout()
+        tab.setLayout(layout)
+        
+        # Выбор таблицы
+        src_layout = QHBoxLayout()
+        src_layout.addWidget(QLabel("Таблица:"))
+        self.logic_table_combo = QComboBox()
+        self.populate_table_combo(self.logic_table_combo)
+        src_layout.addWidget(self.logic_table_combo)
+        layout.addLayout(src_layout)
+        
+        # Раздел CASE
+        case_group = QGroupBox("1. Конструктор условий (CASE)")
+        case_layout = QVBoxLayout()
+        case_layout.addWidget(QLabel("<i>Если выполняется условие WHEN, то вернуть значение THEN.</i>"))
+        
+        # Таблица условий
+        self.case_table = QTableWidget(3, 2)
+        self.case_table.setHorizontalHeaderLabels(["Если (Условие)", "То (Результат)"])
+        self.case_table.horizontalHeader().setStretchLastSection(True)
+        case_layout.addWidget(self.case_table)
+        
+        # ELSE
+        form_else = QFormLayout()
+        self.case_else = QLineEdit()
+        self.case_else.setPlaceholderText("Иначе NULL")
+        form_else.addRow("Иначе (ELSE):", self.case_else)
+        case_layout.addLayout(form_else)
+        
+        btn_case = QPushButton("Выполнить CASE")
+        btn_case.clicked.connect(self.execute_case)
+        case_layout.addWidget(btn_case)
+        
+        case_group.setLayout(case_layout)
+        layout.addWidget(case_group)
+        
+        # Раздел NULL функций
+        null_group = QGroupBox("2. Обработка пустых значений (NULL)")
+        null_layout = QFormLayout()
+        
+        self.null_func = QComboBox()
+        self.null_func.addItems(["COALESCE (Заменить NULL на...)", "NULLIF (Вернуть NULL если равно...)"])
+        null_layout.addRow("Функция:", self.null_func)
+        
+        self.null_arg1 = QLineEdit()
+        self.null_arg1.setPlaceholderText("Поле или значение")
+        null_layout.addRow("Аргумент 1:", self.null_arg1)
+        
+        self.null_arg2 = QLineEdit()
+        self.null_arg2.setPlaceholderText("Значение замены / Сравнения")
+        null_layout.addRow("Аргумент 2:", self.null_arg2)
+        
+        btn_null = QPushButton("Выполнить")
+        btn_null.clicked.connect(self.execute_null_func)
+        null_layout.addWidget(btn_null)
+        
+        null_group.setLayout(null_layout)
+        layout.addWidget(null_group)
         
         layout.addStretch()
     
@@ -307,8 +459,10 @@ class AdvancedViewDialog(QDialog):
             combo.addItem(table, table)
         combo.setCurrentIndex(0)
 
-    def populate_column_combo(self, combo, table_name):
+    def populate_column_combo(self, combo, table_name, include_empty=False):
         combo.clear()
+        if include_empty:
+            combo.addItem("Не выбрано", "")
         if not table_name:
             return
         columns = [col[0] for col in get_table_columns(table_name)]
@@ -334,7 +488,7 @@ class AdvancedViewDialog(QDialog):
         elif "LPAD" in func or "RPAD" in func:
             self.string_param1.setPlaceholderText("Длина")
             self.string_param2.setPlaceholderText("Символ заполнения")
-        elif "CONCAT" in func or "||" in func:
+        elif "CONCAT" in func:
             self.string_param1.setPlaceholderText("Второй столбец или текст")
             self.string_param2.setPlaceholderText("Третий столбец или текст (опционально)")
         else:
@@ -352,24 +506,38 @@ class AdvancedViewDialog(QDialog):
         query = f"SELECT {columns} FROM ddos.{quote_ident(table)}"
         
         # WHERE
-        where = self.where_text.text().strip()
-        if where:
-            query += f" WHERE {where}"
+        where_col = self.where_col.currentData()
+        where_val = self.where_val.text().strip()
+        if where_col and where_val:
+            op = self.where_op.currentText()
+            # Форматирование значения (число или строка)
+            try:
+                float(where_val)
+            except ValueError:
+                where_val = f"'{where_val}'"
+            query += f" WHERE {quote_ident(where_col)} {op} {where_val}"
         
         # GROUP BY
-        group_by = self.group_by_text.text().strip()
+        group_by = self.group_by_combo.currentData()
+        # Проверяем, не выбрано ли "Не группировать" (пустой текст или спец значение)
         if group_by:
-            query += f" GROUP BY {group_by}"
+            query += f" GROUP BY {quote_ident(group_by)}"
         
         # HAVING
-        having = self.having_text.text().strip()
-        if having:
-            query += f" HAVING {having}"
+        having_val = self.having_val.text().strip()
+        if having_val:
+            agg = self.having_agg.currentText()
+            op = self.having_op.currentText()
+            # Простая защита от инъекций для числовых значений
+            if not having_val.replace('.', '', 1).isdigit():
+                having_val = f"'{having_val}'"
+            query += f" HAVING {agg} {op} {having_val}"
         
         # ORDER BY
-        order_by = self.order_by_text.text().strip()
-        if order_by:
-            query += f" ORDER BY {order_by}"
+        order_col = self.order_by_combo.currentData()
+        if order_col:
+            order_dir = "DESC" if "DESC" in self.order_direction.currentText() else "ASC"
+            query += f" ORDER BY {quote_ident(order_col)} {order_dir}"
         
         return query
     
@@ -387,32 +555,36 @@ class AdvancedViewDialog(QDialog):
         """Выполнить поиск по тексту"""
         column = self.search_column.currentData()
         pattern = self.search_pattern.text().strip()
-        search_type = self.search_type.currentText()
+        search_type_text = self.search_type.currentText()
         
         if not pattern:
             QMessageBox.warning(self, "Ошибка", "Введите шаблон поиска")
             return
         
-        # Определяем оператор
-        if "LIKE" in search_type:
-            operator = "LIKE" if "ILIKE" not in search_type else "ILIKE"
-            pattern = f"'{pattern}'"
-        elif "~*" in search_type:
-            operator = "~*"
-            pattern = f"'{pattern}'"
-        elif "!~*" in search_type:
-            operator = "!~*"
-            pattern = f"'{pattern}'"
-        elif "!~" in search_type:
-            operator = "!~"
-            pattern = f"'{pattern}'"
-        else:  # ~
-            operator = "~"
-            pattern = f"'{pattern}'"
+        # Определяем оператор из дружелюбного текста
+        operator = "LIKE" # Default
+        if "LIKE" in search_type_text and "ILIKE" not in search_type_text: operator = "LIKE"
+        elif "ILIKE" in search_type_text: operator = "ILIKE"
+        elif "~" in search_type_text and "POSIX" in search_type_text:
+            if "!~*" in search_type_text: operator = "!~*"
+            elif "!~" in search_type_text: operator = "!~"
+            elif "~*" in search_type_text: operator = "~*"
+            else: operator = "~"
+        elif "SIMILAR TO" in search_type_text:
+            if "NOT" in search_type_text:
+                operator = "NOT SIMILAR TO"
+            else:
+                operator = "SIMILAR TO"
+
+        # Форматируем шаблон
+        pattern_sql = f"'{pattern}'"
         
         table = self.search_table_combo.currentData() or "experiments"
-        col_expr = f"({quote_ident(column)}::text)" if operator in ("LIKE", "ILIKE") or "~~" in operator else quote_ident(column)
-        query = f"SELECT * FROM ddos.{quote_ident(table)} WHERE {col_expr} {operator} {pattern}"
+        
+        # Для LIKE/ILIKE иногда нужно кастить в text
+        col_expr = f"({quote_ident(column)}::text)"
+        
+        query = f"SELECT * FROM ddos.{quote_ident(table)} WHERE {col_expr} {operator} {pattern_sql}"
         success, data, columns = execute_custom_query(query)
         
         if success:
@@ -424,54 +596,44 @@ class AdvancedViewDialog(QDialog):
         """Выполнить функции работы со строками"""
         column = self.string_column.currentData()
         col_sql = quote_ident(column) if column else column
-        func = self.string_func.currentText()
+        func_text = self.string_func.currentText()
         param1 = self.string_param1.text().strip()
         param2 = self.string_param2.text().strip()
         
         # Строим выражение функции
-        if "UPPER" in func:
+        # Принудительно кастим к тексту для строковых функций
+        col_sql = f"{quote_ident(column)}::text" if column else column
+        
+        expr = column
+        
+        if "UPPER" in func_text:
             expr = f"UPPER({col_sql})"
-        elif "LOWER" in func:
+        elif "LOWER" in func_text:
             expr = f"LOWER({col_sql})"
-        elif "SUBSTRING" in func:
+        elif "SUBSTRING" in func_text:
             if not param1 or not param2:
                 QMessageBox.warning(self, "Ошибка", "Укажите начало и длину")
                 return
             expr = f"SUBSTRING({col_sql} FROM {param1} FOR {param2})"
-        elif "TRIM" in func:
+        elif "TRIM" in func_text:
             expr = f"TRIM({col_sql})"
-        elif "LTRIM" in func:
-            expr = f"LTRIM({col_sql})"
-        elif "RTRIM" in func:
-            expr = f"RTRIM({col_sql})"
-        elif "LPAD" in func:
+        elif "LPAD" in func_text:
             if not param1:
                 QMessageBox.warning(self, "Ошибка", "Укажите длину")
                 return
-            pad_char = param2 if param2 else "' '"
-            expr = f"LPAD({col_sql}, {param1}, {pad_char})"
-        elif "RPAD" in func:
+            pad_char = f"'{param2}'" if param2 else "' '"
+            expr = f"LPAD({col_sql}::text, {param1}, {pad_char})"
+        elif "RPAD" in func_text:
             if not param1:
                 QMessageBox.warning(self, "Ошибка", "Укажите длину")
                 return
-            pad_char = param2 if param2 else "' '"
-            expr = f"RPAD({col_sql}, {param1}, {pad_char})"
-        elif "CONCAT" in func:
+            pad_char = f"'{param2}'" if param2 else "' '"
+            expr = f"RPAD({col_sql}::text, {param1}, {pad_char})"
+        elif "CONCAT" in func_text:
             parts = [col_sql]
-            if param1:
-                parts.append(param1)
-            if param2:
-                parts.append(param2)
+            if param1: parts.append(f"'{param1}'") # Предполагаем текст
+            if param2: parts.append(f"'{param2}'")
             expr = f"CONCAT({', '.join(parts)})"
-        elif "||" in func:
-            parts = [col_sql]
-            if param1:
-                parts.append(param1)
-            if param2:
-                parts.append(param2)
-            expr = " || ".join(parts)
-        else:
-            expr = column
         
         table = self.strings_table_combo.currentData() or "experiments"
         query = f"SELECT {quote_ident(column)}, {expr} AS result FROM ddos.{quote_ident(table)}"
@@ -484,7 +646,11 @@ class AdvancedViewDialog(QDialog):
     
     def execute_join(self):
         """Выполнить JOIN"""
-        join_type = self.join_type.currentText()
+        # Извлекаем тип JOIN из текста (например "INNER JOIN (Только...)")
+        join_type_full = self.join_type.currentText()
+        join_type = join_type_full.split(' ')[0] + " JOIN" # Берём первое слово (INNER/LEFT...) + JOIN
+        if "FULL" in join_type_full: join_type = "FULL JOIN"
+
         table1 = self.join_table1.currentData()
         table2 = self.join_table2.currentData()
         field1 = self.join_field1.currentData()
@@ -512,6 +678,68 @@ class AdvancedViewDialog(QDialog):
             self.display_results(data, cols if cols else [])
         else:
             QMessageBox.critical(self, "Ошибка", f"Ошибка JOIN:\n{data}")
+            
+    def execute_case(self):
+        """Выполнить запрос с CASE"""
+        table = self.logic_table_combo.currentData()
+        
+        cases = []
+        for i in range(self.case_table.rowCount()):
+            w_item = self.case_table.item(i, 0)
+            t_item = self.case_table.item(i, 1)
+            if w_item and t_item and w_item.text().strip():
+                when_expr = w_item.text().strip()
+                then_expr = t_item.text().strip()
+                cases.append(f"WHEN {when_expr} THEN {then_expr}")
+        
+        if not cases:
+            QMessageBox.warning(self, "Ошибка", "Заполните хотя бы одно условие")
+            return
+            
+        else_val = self.case_else.text().strip()
+        else_part = f" ELSE {else_val}" if else_val else ""
+        
+        case_sql = "CASE " + " ".join(cases) + else_part + " END"
+        
+        query = f"SELECT *, {case_sql} AS case_result FROM ddos.{quote_ident(table)}"
+        success, data, cols = execute_custom_query(query)
+        
+        if success:
+            self.display_results(data, cols)
+        else:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка CASE:\n{data}")
+
+    def execute_null_func(self):
+        """Выполнить COALESCE или NULLIF"""
+        func_text = self.null_func.currentText()
+        arg1 = self.null_arg1.text().strip()
+        arg2 = self.null_arg2.text().strip()
+        table = self.logic_table_combo.currentData()
+        
+        if not arg1:
+            QMessageBox.warning(self, "Ошибка", "Укажите первый аргумент")
+            return
+            
+        if "COALESCE" in func_text:
+            # Для COALESCE второй аргумент может содержать несколько значений через запятую
+            # Если аргумент 2 пуст, это ошибка (минимум 2 аргумента обычно, хотя 1 тоже работает в pg)
+            args = arg1
+            if arg2:
+                args += ", " + arg2
+            expr = f"COALESCE({args})"
+        else: # NULLIF
+            if not arg2:
+                 QMessageBox.warning(self, "Ошибка", "Для NULLIF нужны 2 аргумента")
+                 return
+            expr = f"NULLIF({arg1}, {arg2})"
+            
+        query = f"SELECT *, {expr} AS func_result FROM ddos.{quote_ident(table)}"
+        success, data, cols = execute_custom_query(query)
+        
+        if success:
+            self.display_results(data, cols)
+        else:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка выполнения:\n{data}")
     
     def display_results(self, data, columns):
         """Отобразить результаты в таблице"""
@@ -539,4 +767,3 @@ class AdvancedViewDialog(QDialog):
                 self.table.setItem(row, col, QTableWidgetItem(str(value) if value is not None else ""))
         
         self.table.resizeColumnsToContents()
-
